@@ -161,9 +161,14 @@ pub async fn check_many<K: Send>(items: Vec<(K, Option<Profile>)>, ctx: &ProbeCt
 pub async fn check_many_verdicts<K: Send>(items: Vec<(K, Option<Profile>)>, ctx: &ProbeCtx,
     cancel: &CancellationToken) -> Result<Vec<(K, KeyCheck)>, HealthError>;
 pub const LIST_DEADLINE: Duration /*20 min*/;
-pub async fn check_list<K: Send>(items: Vec<(K, Option<Profile>)>, ctx: &ProbeCtx, until: tokio::time::Instant,
-    stop: &CancellationToken, on_result: impl Fn(&K, &KeyCheck) + Send + Sync) -> Vec<(K, KeyCheck)>;
+pub async fn check_list<K: Send>(groups: Vec<ListGroup<K>>, until: tokio::time::Instant, stop: &CancellationToken,
+    on_result: impl Fn(&K, &KeyCheck) + Send + Sync, on_wait: impl Fn(&K, Duration) + Send + Sync) -> ListOutcome<K>;
 ```
+Lab live-9 L9-7: chains start in readiness order (names the budget lets through now first, the longest
+chain first; then held names, the shortest wait first), and `on_wait(key, wait)` names every key of a
+chain that must wait for its name's budget, before the wait (the page shows «ждёт лимита
+рукопожатий»; its result clears it). The app answers the connected session's own server from the
+session (proven by its traffic) instead of spending a handshake on it (`app api_servers/checks/fresh.rs`).
 `check_list` (the list-wide check, RU-2026 item 6): keys chained per budget endpoint (one probe at a
 time, list order), each chain first waits out its endpoint's budget (`HandshakeBudget::wait_for`:
 the 3-a-minute window, the `FREEZE_BACKOFF` hold) without holding a probe, then takes one of
@@ -476,6 +481,7 @@ pub enum BudgetError { Deferred { retry_after: Duration }, Cancelled }   // -> A
 pub fn budget() -> &'static HandshakeBudget;                    // the one process-wide budget
 impl HandshakeBudget {
     pub async fn acquire(&self, e: &Endpoint, max_wait: Duration, cancel: &CancellationToken) -> Result<(), BudgetError>;
+    // a cancelled wait, or one dropped before its slot (a caller's deadline, review live2-a1), gives it back
     pub fn hold(&self, e: &Endpoint, quiet: Duration);   // after a freeze: no handshake before `quiet` passed
 }
 // transfer check (one connection = one handshake): GET /cdn-cgi/trace (keep-alive), then

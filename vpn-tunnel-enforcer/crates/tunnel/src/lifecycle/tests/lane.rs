@@ -80,7 +80,8 @@ async fn soft_refresh_over_native_is_refused() {
 }
 
 /// §7.1 "compensates runtime effects when main cannot confirm start": the start that cannot be
-/// proven is stopped once by its own effect; the state is `error`.
+/// proven is stopped once by its own effect; with nothing of ours left the state is
+/// `disconnected` (lab live-9 L9-1: «Подключить», not «Снять защиту»; the error stays the op's).
 #[tokio::test]
 async fn unconfirmed_start_is_compensated_once() {
     let h = Harness::new();
@@ -94,7 +95,10 @@ async fn unconfirmed_start_is_compensated_once() {
     assert_eq!(h.rt.script.lock().stops, 1);
     assert!(!h.rt.running());
     let snap = h.snap();
-    assert_eq!((snap.state, snap.transition), (TunnelState::Error, None));
+    assert_eq!(
+        (snap.state, snap.transition),
+        (TunnelState::Disconnected, None)
+    );
     assert!(!h.lc.busy());
 }
 

@@ -117,22 +117,30 @@ impl Actions {
         let (id, name) = (id.to_owned(), name.to_owned());
         store.group_busy(&id, |b| b.health = true);
         self.spawn(async move {
-            // Rows take their results as they land (speed audit ops3), the toast sums up.
+            // Rows take their results as they land (speed audit ops3), the toast sums up; a row
+            // whose server name's handshake budget holds it back says so (lab live-9 L9-7).
             let (tx, mut rx) = mpsc::unbounded_channel();
-            let run = api.check_group_health_live(&id, tx);
+            let (wtx, mut wrx) = mpsc::unbounded_channel();
+            let run = api.check_group_health_watched(&id, tx, wtx);
             futures_util::pin_mut!(run);
+            let mut waited = Vec::new();
             let result = loop {
                 tokio::select! {
                     result = &mut run => break result,
-                    Some((sid, health)) = rx.recv() => store.row(&sid, |r| r.health = Some(health)),
+                    Some((sid, health)) = rx.recv() => store.health_landed(&sid, health),
+                    Some(sid) = wrx.recv() => {
+                        store.row(&sid, |r| r.budget_wait = true);
+                        waited.push(sid);
+                    }
                 }
             };
+            store.waits_ended(&waited);
             store.group_busy(&id, |b| b.health = false);
             match result {
                 Ok(report) => {
                     let body = health_body(&report);
                     for (sid, health) in report.results {
-                        store.row(&sid, |r| r.health = Some(health));
+                        store.health_landed(&sid, health);
                     }
                     toasts.info(name, Some(body));
                 }

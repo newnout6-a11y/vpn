@@ -40,12 +40,15 @@ pub struct ListOutcome<K> {
 /// without a probe) until all are done, `until` passes or `stop` fires; probes in flight then are
 /// dropped (not checked) and the finished results are kept. All groups run at once behind the
 /// one probe limit, so a slow name in one group never starves another (psmall-a1/b5).
-/// `on_result` sees each result as it lands.
+/// `on_result` sees each result as it lands; `on_wait` hears of each key whose check waits for
+/// its server name's handshake budget (how long), before the wait (lab live-9 L9-7: the page
+/// says so instead of a silent minute).
 pub async fn check_list<K: Send>(
     groups: Vec<ListGroup<K>>,
     until: Instant,
     stop: &CancellationToken,
     on_result: impl Fn(&K, &KeyCheck) + Send + Sync,
+    on_wait: impl Fn(&K, Duration) + Send + Sync,
 ) -> ListOutcome<K> {
     let mut ctxs = Vec::with_capacity(groups.len());
     let mut items = Vec::new();
@@ -60,7 +63,8 @@ pub async fn check_list<K: Send>(
         async move { check_profile_verdict(&p, ctx, &cancel).await }
     };
     let report = |(key, _): &(K, usize), check: &KeyCheck| on_result(key, check);
-    let (done, unchecked) = run_chains(items, until, stop, report, check).await;
+    let wait = |(key, _): &(K, usize), wait: Duration| on_wait(key, wait);
+    let (done, unchecked) = run_chains(items, until, stop, report, wait, check).await;
     let done = done.into_iter().map(|((key, _), c)| (key, c)).collect();
     ListOutcome { done, unchecked }
 }
@@ -71,6 +75,7 @@ pub(crate) async fn run_chains<K, F, Fut>(
     until: Instant,
     stop: &CancellationToken,
     on_result: impl Fn(&K, &KeyCheck) + Send + Sync,
+    on_wait: impl Fn(&K, Duration) + Send + Sync,
     check: F,
 ) -> (Vec<(K, KeyCheck)>, Option<AppError>)
 where
@@ -81,13 +86,20 @@ where
     let probes = Semaphore::new(CONCURRENCY);
     let done = Mutex::new(Vec::new());
     let first_error = Mutex::new(None);
-    let chains = chains(items).into_iter().map(|chain| async {
-        for (key, profile) in chain {
+    let chains = by_readiness(chains(items)).into_iter().map(|chain| async {
+        let mut chain = chain.into_iter();
+        while let Some((key, profile)) = chain.next() {
             let result = match profile {
                 None => unreadable(),
                 Some(p) => {
                     if let Some(endpoint) = Endpoint::of(&p) {
-                        tokio::time::sleep(budget().wait_for(&endpoint)).await;
+                        let wait = budget().wait_for(&endpoint);
+                        if !wait.is_zero() {
+                            // The keys behind it in the chain wait for the same budget.
+                            on_wait(&key, wait);
+                            chain.as_slice().iter().for_each(|(k, _)| on_wait(k, wait));
+                        }
+                        tokio::time::sleep(wait).await;
                     }
                     let Ok(_probe) = probes.acquire().await else {
                         return;
@@ -132,6 +144,19 @@ fn chains<K>(items: Vec<(K, Option<Profile>)>) -> Vec<Vec<(K, Option<Profile>)>>
         };
         chains[at].push(item);
     }
+    chains
+}
+
+/// Lab live-9 L9-7: the names the budget lets through now first, the longest chain first (its
+/// later keys need the most windows, so its first window should open soonest); then the names
+/// held back, the shortest wait first. Every chain still runs at once: this orders who gets the
+/// free probes first.
+fn by_readiness<K>(mut chains: Vec<Vec<(K, Option<Profile>)>>) -> Vec<Vec<(K, Option<Profile>)>> {
+    chains.sort_by_cached_key(|chain| {
+        let first = chain.first().and_then(|(_, p)| p.as_ref());
+        let wait = first.and_then(Endpoint::of).map(|e| budget().wait_for(&e));
+        (wait.unwrap_or_default(), std::cmp::Reverse(chain.len()))
+    });
     chains
 }
 

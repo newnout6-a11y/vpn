@@ -31,7 +31,12 @@ use vpnte_ui::servers::{CountryCheck, HealthReport, KeyHealth};
 use super::project::{reason_code, same_wire};
 use super::{Shared, group_not_found, server_not_found};
 
+mod fresh;
 mod list;
+
+/// The rows whose check waits for its server name's handshake budget, named before the wait
+/// (lab live-9 L9-7: the page says В«Р¶РґС‘С‚ Р»РёРјРёС‚Р° СЂСѓРєРѕРїРѕР¶Р°С‚РёР№В» instead of a silent minute).
+pub(super) type Waits = mpsc::UnboundedSender<String>;
 
 /// Positive answers of the IP column are reused this long, failures for [`MISS_TTL`].
 const HIT_TTL: Duration = Duration::from_secs(5 * 60);
@@ -260,6 +265,7 @@ pub(super) async fn group_health(
     id: GroupId,
     cancel: CancellationToken,
     results: Option<mpsc::UnboundedSender<(String, KeyHealth)>>,
+    waits: Option<Waits>,
 ) -> AppResult<HealthReport> {
     let backend = shared.backend.clone();
     let rows = backend.servers.read(|doc| {
@@ -280,6 +286,7 @@ pub(super) async fn group_health(
     }
     let submitted = rows.len();
     let tunnel = backend.tunnel()?.clone();
+    let proven = fresh::connected(&*tunnel);
     let saver = Arc::new(list::Saver::new(backend.servers.clone()));
     let until = tokio::time::Instant::now() + key_health::BATCH_DEADLINE;
     let opts = RunOpts {
@@ -292,20 +299,24 @@ pub(super) async fn group_health(
     let checked = backend
         .ops
         .run(FeatureKind::HealthCheck, opts, move |lease| async move {
-            let groups = probe_groups(&tunnel, rows);
+            let (groups, credited) = fresh::credit(probe_groups(&tunnel, rows), proven.as_ref());
             let report = |key: &Key, check: &KeyCheck| {
                 if let Some(results) = &results {
                     let _ = results.send((key.0.to_string(), key_health_view(&check.health)));
                 }
                 saver.add(key, check);
             };
-            let found = key_health::check_list(groups, until, lease.token(), report).await;
-            if let Some(err) = found.unchecked.filter(|_| found.done.is_empty()) {
+            credited.iter().for_each(|(key, check)| report(key, check));
+            let wait = |key: &Key, _: Duration| notify_wait(waits.as_ref(), key);
+            let token = lease.token();
+            let found = key_health::check_list(groups, until, token, report, wait).await;
+            let done: Vec<_> = credited.into_iter().chain(found.done).collect();
+            if let Some(err) = found.unchecked.filter(|_| done.is_empty()) {
                 return Err(err);
             }
             lease.commit(|| {
                 saver.finish()?;
-                Ok(found.done)
+                Ok(done)
             })
         })
         .await?;
@@ -336,6 +347,7 @@ fn probe_groups(
 pub(super) async fn list_health(
     shared: Arc<Shared>,
     results: mpsc::UnboundedSender<(String, KeyHealth)>,
+    waits: Option<Waits>,
     stop: CancellationToken,
 ) -> AppResult<HealthReport> {
     let backend = shared.backend.clone();
@@ -350,6 +362,7 @@ pub(super) async fn list_health(
     }
     let submitted = rows.len();
     let tunnel = backend.tunnel()?.clone();
+    let proven = fresh::connected(&*tunnel);
     let saver = Arc::new(list::Saver::new(backend.servers.clone()));
     let until = tokio::time::Instant::now() + key_health::LIST_DEADLINE;
     let opts = RunOpts {
@@ -363,24 +376,34 @@ pub(super) async fn list_health(
         .ops
         .run(FeatureKind::HealthCheck, opts, move |lease| async move {
             // Every group at once behind the one probe limit (psmall-a1/b5).
-            let groups = probe_groups(&tunnel, rows);
+            let (groups, credited) = fresh::credit(probe_groups(&tunnel, rows), proven.as_ref());
             let report = |key: &Key, check: &KeyCheck| {
                 let _ = results.send((key.0.to_string(), key_health_view(&check.health)));
                 saver.add(key, check);
             };
-            let found = key_health::check_list(groups, until, &stop, report).await;
+            credited.iter().for_each(|(key, check)| report(key, check));
+            let wait = |key: &Key, _: Duration| notify_wait(waits.as_ref(), key);
+            let found = key_health::check_list(groups, until, &stop, report, wait).await;
+            let done: Vec<_> = credited.into_iter().chain(found.done).collect();
             // Nothing could be checked at all: the reason, as a group check gives it (psmall-a4).
-            if let Some(err) = found.unchecked.filter(|_| found.done.is_empty()) {
+            if let Some(err) = found.unchecked.filter(|_| done.is_empty()) {
                 return Err(err);
             }
             lease.commit(|| {
                 saver.finish()?;
-                Ok(found.done)
+                Ok(done)
             })
         })
         .await?;
     shared.publish();
     Ok(health_report(&checked, submitted))
+}
+
+/// Names a row whose check waits for its server name's budget (the page may be gone: ignored).
+fn notify_wait(waits: Option<&Waits>, key: &Key) {
+    if let Some(waits) = waits {
+        let _ = waits.send(key.0.to_string());
+    }
 }
 
 /// The page's report: every checked key's health, and the keys left without a result counted.

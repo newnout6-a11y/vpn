@@ -136,6 +136,24 @@ async fn acquire_returns_a_cancelled_slot_and_maps_the_error() {
     assert_eq!(msg.key, "probes.discipline.deferred");
 }
 
+/// Review live2-a1: a wait dropped before its slot (a caller's deadline) gives the slot back,
+/// like a cancelled one; a slot reached is kept.
+#[tokio::test(start_paused = true)]
+async fn a_dropped_wait_gives_its_slot_back() {
+    let b = HandshakeBudget::default();
+    let e = sni("dropped.example.com");
+    let live = CancellationToken::new();
+    for _ in 0..3 {
+        b.acquire(&e, MINUTE_PLUS, &live).await.unwrap();
+    }
+    let before = b.wait_for(&e);
+    let waited = tokio::time::timeout(ms(100), b.acquire(&e, MINUTE_PLUS, &live)).await;
+    assert!(waited.is_err(), "still waiting at the deadline");
+    let after = b.wait_for(&e);
+    assert!(after < before, "slot given back: {before:?} -> {after:?}");
+    assert!(after > Duration::from_secs(58), "the three kept: {after:?}");
+}
+
 /// The budget key: the TLS server name when one is sent (any case), the server's domain when
 /// TLS names none, `host:port` without a name (no TLS, an IP server, SNI disabled); a loopback
 /// server (a local proxy) is not budgeted.

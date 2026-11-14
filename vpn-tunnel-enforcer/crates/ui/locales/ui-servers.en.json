@@ -458,6 +458,7 @@
         "switchBusy": "Wait until the connection or switch finishes",
         "freshPing": "Last direct ping: the server is reachable",
         "notChecked": "Not checked",
+        "budgetWait": "waiting for the handshake limit",
         "pingFailed": "The ping failed. That does not mean the key is dead: direct TCP pings are often filtered.",
         "ms": "{{ms}} ms",
         "exit": "Exit: {{ip}}",

@@ -53,14 +53,16 @@ pub(super) fn admit(run: &EngineRun, req: &StartRequest) -> AppResult<()> {
 pub(super) async fn plan(
     engines: &dyn Engines,
     profile: &VpnProfile,
+    held: &[u16],
     op: &CancellationToken,
 ) -> AppResult<(MihomoPlan, Vec<Msg>)> {
     let p = &profile.profile;
     preflight(p)?;
     let resolved = engines.resolve(&hosts(p), ResolvePath::Direct, op).await?;
-    let socks = SlotEndpoint::allocate(&[])?;
-    let hop = HopEndpoint::allocate(&[socks.port()])?;
-    let controller = ClashEndpoint::allocate(&[socks.port(), hop.port()])?;
+    // `held`: the capture's own listener (L9-1), never handed to mihomo.
+    let socks = SlotEndpoint::allocate(held)?;
+    let hop = HopEndpoint::allocate(&[held, &[socks.port()]].concat())?;
+    let controller = ClashEndpoint::allocate(&[held, &[socks.port(), hop.port()]].concat())?;
     let listen = Listen {
         socks: &socks,
         hop: &hop,

@@ -180,6 +180,8 @@ Section "Install"
   File /r "${STAGE}\licenses\*"
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\${UNINST}"
+  ; The WebView2 bootstrapper (~95 s on a clean Windows) runs beside the steps below (lab live-9 L9-9).
+  Call StartWebView2
   Call WriteRegistry
   Call CreateShortcuts
   Call RegisterLinks

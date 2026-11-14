@@ -513,6 +513,11 @@ pub trait ServersApi: 'static {      // root component ServersPage; use_servers_
         -> AppResult<HealthReport>;  // «Проверить все» (RU-2026 item 6): every server not removed by the user,
                                   // through itself under each name's budget; results stream; a dropped call
                                   // stops it and the backend keeps what finished (page: a second click stops)
+    async fn check_group_health_watched(&self, id: &str, results: .., waits: mpsc::UnboundedSender<String>)
+        -> AppResult<HealthReport>;  // lab live-9 L9-7 (default: the live call): `waits` names each row whose
+    async fn check_all_health_watched(&self, results: .., waits: mpsc::UnboundedSender<String>)
+        -> AppResult<HealthReport>;  // check waits for its server name's handshake budget; the row shows
+                                  // «ждёт лимита рукопожатий» (`RowRt.budget_wait`) until its result or the end
     async fn set_device(&self, id: &str, device: ClientDevice) -> AppResult<()>; // connected server reconnects
     async fn set_engine(&self, id: &str, engine: EnginePref) -> AppResult<()>; // own engine (Auto = setting);
                                   // impossible forced choice = Validation with the engine Msg; reconnects

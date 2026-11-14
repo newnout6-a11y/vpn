@@ -76,7 +76,9 @@ pub(super) async fn check(engine: &Path, file: &Path, tag: &str, reference: &Pat
                 .map_err(|err| tracing::warn!(%err, file = %p.display(), "rule set not decompiled"))
                 .ok()
         };
-        let (json, release) = (read(file).await?, read(&copy).await?);
+        // Two engine runs side by side (lab live-9 L9-2: the checks sat in the first connect).
+        let (json, release) = tokio::join!(read(file), read(&copy));
+        let (json, release) = (json?, release?);
         bounds(tag, &json, &release)
     } else {
         Err(OutOfBounds::Size(got))
@@ -160,9 +162,10 @@ fn name_bounds(json: &str, release: &str) -> Result<(), OutOfBounds> {
     Ok(())
 }
 
-/// The blocked sites: at least [`KEPT_SHARE`] of the copy's names are still there.
+/// The blocked sites: at least [`KEPT_SHARE`] of the copy's names are still there, in rules
+/// that match by the name alone.
 fn kept_names(json: &str, release: &str) -> Result<(), OutOfBounds> {
-    let got: HashSet<String> = names(lenient(json)?)?.into_iter().collect();
+    let got: HashSet<String> = names(unconditioned(lenient(json)?))?.into_iter().collect();
     let copy = names(lenient(release)?)?;
     let kept = copy.iter().filter(|n| got.contains(*n)).count();
     if (kept as f64) < copy.len() as f64 * KEPT_SHARE {
@@ -171,9 +174,10 @@ fn kept_names(json: &str, release: &str) -> Result<(), OutOfBounds> {
     Ok(())
 }
 
-/// The blocked addresses: at least [`KEPT_SHARE`] of the copy's space is still covered.
+/// The blocked addresses: at least [`KEPT_SHARE`] of the copy's space is still covered, by
+/// rules that match by the address alone.
 fn kept_space(json: &str, release: &str) -> Result<(), OutOfBounds> {
-    let got = Space::of(&cidrs(lenient(json)?)?);
+    let got = Space::of(&cidrs(unconditioned(lenient(json)?))?);
     let copy = Space::of(&cidrs(lenient(release)?)?);
     for (got, copy) in [(&got.v4, &copy.v4), (&got.v6, &copy.v6)] {
         let kept = copy.size() - copy.minus(got).size();
@@ -198,6 +202,24 @@ fn strict(json: &str, key: &str) -> Result<Vec<Value>, OutOfBounds> {
     } else {
         Err(OutOfBounds::Shape)
     }
+}
+
+/// The rules that match by their names or networks alone. Review live2-a4: a rule with any
+/// other condition (a port, a network, `invert`, a logical type) may never match in use, so
+/// what it lists does not count as kept.
+fn unconditioned(rules: Vec<Value>) -> Vec<Value> {
+    const MATCHERS: [&str; 5] = [
+        "domain",
+        "domain_suffix",
+        "domain_keyword",
+        "domain_regex",
+        "ip_cidr",
+    ];
+    let plain = |r: &Value| {
+        r.as_object()
+            .is_some_and(|o| o.keys().all(|k| MATCHERS.contains(&k.as_str())))
+    };
+    rules.into_iter().filter(plain).collect()
 }
 
 /// Every rule of a decompiled set, whatever it holds.

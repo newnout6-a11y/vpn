@@ -443,7 +443,15 @@ pub trait Confirmations: Send + Sync { fn confirmed_within(&self, age: Duration)
     async fn release(&self) -> AppResult<()>;
     async fn wait_gone(&self, plan: &CapturePlan, timeout: Duration, cancel: &CancellationToken) -> bool;
     async fn check(&self, proof: &CaptureProof) -> CaptureCheck;
-    fn guard(&self, plan: &CapturePlan) -> KillSwitchLevel { plan.guard } } // TunCapture: level in force, live
+    fn guard(&self, plan: &CapturePlan) -> KillSwitchLevel { plan.guard }  // TunCapture: level in force, live
+    fn ports(&self, plan: &CapturePlan) -> Vec<u16> { Vec::new() } }  // lab live-9 L9-1: the capture's own
+    // listeners (ProxyCapture: its mixed port); every other port of the start (slots A/B, the controller,
+    // the authenticated inbounds, dns-bootstrap, lab mihomo) is allocated around them, so the config's
+    // listeners are distinct by construction. A Connect that failed with `Network`, `Internal` or
+    // `Conflict` (the handshake budget's "retry in N s") and left nothing of ours ends `Disconnected`
+    // (L9-1, review live2-a1). `bring_up` reads the inputs snapshot beside capture / upstream plan /
+    // slot A and awaits it at the config (L9-2, timing line `routing inputs ready`). The exit proof
+    // takes its first handshake slot before its clocks run (live2-a1): a budget wait is never NoReply.
 pub struct CapturePlan { pub alias: Option<String> /* TUN alias, or the mixed port as text */, pub form: TunForm,
     pub stack: TunStack, pub mtu: u16, pub guard: KillSwitchLevel /* what the protection enforces */,
     pub warnings: Vec<Msg> }

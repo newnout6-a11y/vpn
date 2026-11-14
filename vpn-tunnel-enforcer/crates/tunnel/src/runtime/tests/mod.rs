@@ -115,6 +115,11 @@ pub struct World {
     pub resolve_answer: Mutex<Result<Option<Msg>, ResolveFault>>,
     /// The paths server names were resolved on, in order.
     pub resolve_paths: Mutex<Vec<ResolvePath>>,
+    /// Ports the capture listens on itself (a proxy capture's mixed port): `Capture::ports`.
+    pub held_ports: Mutex<Vec<u16>>,
+    /// A snapshot of the inputs takes this long (ms) and then notes `inputs-done` (the helper
+    /// service checks a handed-over Smart RU set inside it).
+    pub inputs_ms: AtomicU32,
     /// The egress probe through a staged upstream gets no answer (a silent server).
     #[cfg(feature = "lab")]
     pub egress_via: Mutex<EgressVia>,
@@ -165,6 +170,8 @@ impl World {
             xray_events: Mutex::new(None),
             resolve_answer: Mutex::new(Ok(None)),
             resolve_paths: Mutex::new(Vec::new()),
+            held_ports: Mutex::new(Vec::new()),
+            inputs_ms: AtomicU32::new(0),
             #[cfg(feature = "lab")]
             egress_via: Mutex::new(EgressVia::Ip),
             #[cfg(feature = "lab")]
@@ -559,6 +566,9 @@ impl Capture for FakeCapture {
         self.0.note(format!("begin:{}", programs.len()));
         Ok(())
     }
+    fn ports(&self, _plan: &CapturePlan) -> Vec<u16> {
+        self.0.held_ports.lock().clone()
+    }
     async fn ready(
         &self,
         plan: &CapturePlan,
@@ -611,6 +621,11 @@ pub struct FakeInputs(pub Arc<World>);
 #[async_trait]
 impl InputsSource for FakeInputs {
     async fn snapshot(&self) -> AppResult<UserInputs> {
+        let takes = self.0.inputs_ms.load(Ordering::SeqCst);
+        if takes > 0 {
+            tokio::time::sleep(Duration::from_millis(takes.into())).await;
+            self.0.note("inputs-done");
+        }
         Ok(UserInputs {
             auto_restart_on_crash: self.0.auto_restart.load(Ordering::SeqCst),
             kill_switch: KillSwitchLevel::Standard,

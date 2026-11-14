@@ -110,6 +110,27 @@ pub trait ServersApi: 'static {
         &self,
         results: mpsc::UnboundedSender<(String, KeyHealth)>,
     ) -> AppResult<HealthReport>;
+    /// [`ServersApi::check_group_health_live`] that also names on `waits` each row whose check
+    /// waits for its server name's handshake budget, before the wait (lab live-9 L9-7).
+    async fn check_group_health_watched(
+        &self,
+        id: &str,
+        results: mpsc::UnboundedSender<(String, KeyHealth)>,
+        waits: mpsc::UnboundedSender<String>,
+    ) -> AppResult<HealthReport> {
+        drop(waits);
+        self.check_group_health_live(id, results).await
+    }
+    /// [`ServersApi::check_all_health`] that also names on `waits` each row whose check waits
+    /// for its server name's handshake budget, before the wait (lab live-9 L9-7).
+    async fn check_all_health_watched(
+        &self,
+        results: mpsc::UnboundedSender<(String, KeyHealth)>,
+        waits: mpsc::UnboundedSender<String>,
+    ) -> AppResult<HealthReport> {
+        drop(waits);
+        self.check_all_health(results).await
+    }
 
     /// Device persona of a server; the connected server reconnects.
     async fn set_device(&self, id: &str, device: ClientDevice) -> AppResult<()>;

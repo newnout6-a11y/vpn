@@ -137,7 +137,10 @@ async fn the_lists_cross_the_pipe_and_are_used_after_the_service_checks_them() {
     }
     let t = temp("pipe");
     let store = t.join("store");
-    let inputs = SharedInputs::with_store(Some(pinned.to_owned()), Some(store.clone()));
+    let inputs = Arc::new(SharedInputs::with_store(
+        Some(pinned.to_owned()),
+        Some(store.clone()),
+    ));
     let set = fresher_set(&t, "fresher", "fresh.example");
 
     let got = over_the_pipe(3, routing(Some(set.clone()))).await;
@@ -175,7 +178,10 @@ async fn a_failing_set_keeps_the_pinned_files() {
     }
     let t = temp("refused");
     let store = t.join("store");
-    let inputs = SharedInputs::with_store(Some(pinned.to_owned()), Some(store.clone()));
+    let inputs = Arc::new(SharedInputs::with_store(
+        Some(pinned.to_owned()),
+        Some(store.clone()),
+    ));
     let bad = t.join("bad");
     copy_set(&bad);
     std::fs::copy(
@@ -209,7 +215,7 @@ async fn a_failing_set_keeps_the_pinned_files() {
     let partial = t.join("install");
     std::fs::create_dir_all(&partial).expect("dir");
     std::fs::copy(pinned.join("geoip-ru.srs"), partial.join("geoip-ru.srs")).expect("copy");
-    let incomplete = SharedInputs::with_store(Some(partial), Some(store));
+    let incomplete = Arc::new(SharedInputs::with_store(Some(partial), Some(store)));
     incomplete.set(&routing(None), KillSwitchLevel::Off);
     assert_eq!(incomplete.get().rule_set_dir, None);
     let _ = std::fs::remove_dir_all(&t);
@@ -225,7 +231,10 @@ async fn a_failing_set_keeps_the_last_set_that_passed() {
         return;
     }
     let t = temp("keeps");
-    let inputs = SharedInputs::with_store(Some(pinned.to_owned()), Some(t.join("store")));
+    let inputs = Arc::new(SharedInputs::with_store(
+        Some(pinned.to_owned()),
+        Some(t.join("store")),
+    ));
     let fresher = fresher_set(&t, "fresher", "fresh.example");
     inputs.set(&routing(Some(fresher)), KillSwitchLevel::Off);
     let fresh = inputs.snapshot().await.expect("inputs").rule_set_dir;
@@ -247,7 +256,10 @@ async fn a_failing_set_keeps_the_last_set_that_passed() {
         assert!(report.refused.is_some());
     }
     // fixlists-a5: a restarted service keeps it too.
-    let restarted = SharedInputs::with_store(Some(pinned.to_owned()), Some(t.join("store")));
+    let restarted = Arc::new(SharedInputs::with_store(
+        Some(pinned.to_owned()),
+        Some(t.join("store")),
+    ));
     restarted.set(&routing(RuleSetFiles::read(&bad)), KillSwitchLevel::Off);
     let dir = restarted.snapshot().await.expect("inputs").rule_set_dir;
     assert_eq!(dir, fresh);
@@ -266,7 +278,7 @@ async fn the_scope_reaches_only_a_service_that_speaks_it() {
         only_listed: Some(vec!["own".into()]),
         ..RoutingInputs::default()
     };
-    let inputs = SharedInputs::with_store(None, None);
+    let inputs = Arc::new(SharedInputs::with_store(None, None));
     let got = over_the_pipe(4, scoped.clone()).await;
     assert_eq!(got, scoped);
     inputs.set(&got, KillSwitchLevel::Off);
@@ -282,4 +294,35 @@ async fn the_scope_reaches_only_a_service_that_speaks_it() {
     let old = Request::Inputs(Box::new(scoped)).speak(3);
     let wire = serde_json::to_string(&old).expect("json");
     assert!(!wire.contains("onlyListed"), "{wire}");
+}
+
+/// Lab live-9 L9-2: a handed-over set is checked when it arrives, before any start asks for it
+/// (the first Tunnel connect spent 4.7 s on that check); the start then finds it accepted by
+/// its digest.
+#[tokio::test]
+async fn a_hand_over_is_checked_when_it_arrives() {
+    let pinned = Path::new(RESOURCES);
+    if !pinned.join("sing-box.exe").is_file() {
+        return;
+    }
+    let t = temp("arrival");
+    let store = t.join("store");
+    let inputs = Arc::new(SharedInputs::with_store(
+        Some(pinned.to_owned()),
+        Some(store.clone()),
+    ));
+    let set = fresher_set(&t, "fresher", "arrival.example");
+    inputs.set(&routing(Some(set.clone())), KillSwitchLevel::Off);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let (digest, dir) = loop {
+        if let Some(accepted) = handover::recall(&store).await {
+            break accepted;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "never checked");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(digest, set.digest());
+    let used = inputs.snapshot().await.expect("inputs").rule_set_dir;
+    assert_eq!(used, Some(dir));
+    let _ = std::fs::remove_dir_all(&t);
 }

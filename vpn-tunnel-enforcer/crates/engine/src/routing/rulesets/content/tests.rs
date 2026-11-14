@@ -149,6 +149,24 @@ fn a_blocked_set_keeps_most_of_the_copy() {
     assert_eq!(kept_space(&shrunk, &copy), Err(OutOfBounds::Shrunk));
 }
 
+/// Review live2-a4: names and networks that sit in a rule with another condition (a port that
+/// never matches, `invert`, a logical rule) are not kept: the canaries alone in a plain rule
+/// plus the rest of the copy behind `port: [1]` is a shrunk list.
+#[test]
+fn only_plain_rules_count_as_kept() {
+    let copy = sites(&["tvrain.ru", "echo.msk.ru", "rutracker.org", "linkedin.com"]);
+    let crafted = r#"{"rules":[{"domain_suffix":["rutracker.org"]},
+        {"domain_suffix":["tvrain.ru","echo.msk.ru","linkedin.com"],"port":[1]}]}"#;
+    assert_eq!(kept_names(crafted, &copy), Err(OutOfBounds::Shrunk));
+    let inverted = r#"{"rules":[{"domain_suffix":["tvrain.ru","echo.msk.ru","linkedin.com"],
+        "invert":true}]}"#;
+    assert_eq!(kept_names(inverted, &copy), Err(OutOfBounds::Shrunk));
+    let copy = ips(&["91.108.4.0/22", "149.154.160.0/20"]);
+    let crafted =
+        r#"{"rules":[{"ip_cidr":["91.108.4.0/22","149.154.160.0/20"],"network":["udp"]}]}"#;
+    assert_eq!(kept_space(crafted, &copy), Err(OutOfBounds::Shrunk));
+}
+
 /// The release's own files pass their bounds against themselves; a missing reference judges
 /// nothing.
 #[tokio::test]

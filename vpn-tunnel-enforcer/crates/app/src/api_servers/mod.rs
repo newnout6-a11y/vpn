@@ -361,7 +361,7 @@ impl ServersApi for ServersBackend {
         let (shared, id) = (self.shared.clone(), GroupId::from(id));
         let shutdown = &self.shared.backend.shutdown;
         cancellable(shutdown, |token| {
-            checks::group_health(shared, id, token, None)
+            checks::group_health(shared, id, token, None, None)
         })
         .await
     }
@@ -375,7 +375,22 @@ impl ServersApi for ServersBackend {
         let shutdown = &self.shared.backend.shutdown;
         let live = Some(results);
         cancellable(shutdown, |token| {
-            checks::group_health(shared, id, token, live)
+            checks::group_health(shared, id, token, live, None)
+        })
+        .await
+    }
+
+    async fn check_group_health_watched(
+        &self,
+        id: &str,
+        results: mpsc::UnboundedSender<(String, KeyHealth)>,
+        waits: mpsc::UnboundedSender<String>,
+    ) -> AppResult<HealthReport> {
+        let (shared, id) = (self.shared.clone(), GroupId::from(id));
+        let shutdown = &self.shared.backend.shutdown;
+        let (live, waits) = (Some(results), Some(waits));
+        cancellable(shutdown, |token| {
+            checks::group_health(shared, id, token, live, waits)
         })
         .await
     }
@@ -385,7 +400,22 @@ impl ServersApi for ServersBackend {
         results: mpsc::UnboundedSender<(String, KeyHealth)>,
     ) -> AppResult<HealthReport> {
         let (shared, shutdown) = (self.shared.clone(), &self.shared.backend.shutdown);
-        cancellable(shutdown, |stop| checks::list_health(shared, results, stop)).await
+        cancellable(shutdown, |stop| {
+            checks::list_health(shared, results, None, stop)
+        })
+        .await
+    }
+
+    async fn check_all_health_watched(
+        &self,
+        results: mpsc::UnboundedSender<(String, KeyHealth)>,
+        waits: mpsc::UnboundedSender<String>,
+    ) -> AppResult<HealthReport> {
+        let (shared, shutdown) = (self.shared.clone(), &self.shared.backend.shutdown);
+        cancellable(shutdown, |stop| {
+            checks::list_health(shared, results, Some(waits), stop)
+        })
+        .await
     }
 
     async fn set_device(&self, id: &str, device: ClientDevice) -> AppResult<()> {

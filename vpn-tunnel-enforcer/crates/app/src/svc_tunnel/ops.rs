@@ -153,7 +153,11 @@ impl TunnelOps for TunnelService {
     async fn apply_settings_change(&self, old: Settings, new: Settings) -> Result<Done, ConnError> {
         // A changed setting is the user's action: automatic paths that began before give up.
         self.coord.user_acted(UserAct::Change);
-        let change = decide::settings_change(&old, &new);
+        let mut change = decide::settings_change(&old, &new);
+        let mode = self.lifecycle.session().borrow().as_ref().map(|s| s.mode);
+        if bypass_restart(mode, &old, &new) {
+            change.restart.push("proxyBypass");
+        }
         if let Some(every) = change.check_interval {
             self.ip.ip.set_interval(every);
         }
@@ -480,6 +484,19 @@ impl TunnelOps for TunnelService {
     }
 }
 
+/// Review live2-a2: a Proxy-capture engine carries «Не через прокси» as direct-out rules built at
+/// its start, so an edited list restarts it; else a removed entry keeps leaving directly for the
+/// rest of the session. The TUN never reads the list.
+fn bypass_restart(
+    mode: Option<vpnte_tunnel::history::SessionMode>,
+    old: &Settings,
+    new: &Settings,
+) -> bool {
+    let edited =
+        old.proxy_bypass != new.proxy_bypass || old.proxy_bypass_auto != new.proxy_bypass_auto;
+    edited && mode == Some(vpnte_tunnel::history::SessionMode::Soft)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -526,5 +543,22 @@ mod tests {
         assert_eq!(now(), (5, true), "the kill switch's level");
         let _ = t.shutdown(Duration::from_secs(5)).await;
         b.shutdown.cancel();
+    }
+
+    /// Review live2-a2: an edited «Не через прокси» list restarts a Proxy-capture session (its
+    /// engine carries the entries as direct rules), never a TUN one or an unchanged list.
+    #[test]
+    fn a_bypass_edit_restarts_only_a_proxy_session() {
+        use vpnte_tunnel::history::SessionMode;
+        let old = vpnte_core::settings::Settings::default();
+        let mut new = old.clone();
+        new.proxy_bypass = vec!["example.org".into()];
+        assert!(super::bypass_restart(Some(SessionMode::Soft), &old, &new));
+        assert!(!super::bypass_restart(Some(SessionMode::Hard), &old, &new));
+        assert!(!super::bypass_restart(None, &old, &new));
+        assert!(!super::bypass_restart(Some(SessionMode::Soft), &old, &old));
+        let mut auto = old.clone();
+        auto.proxy_bypass_auto = !old.proxy_bypass_auto;
+        assert!(super::bypass_restart(Some(SessionMode::Soft), &old, &auto));
     }
 }

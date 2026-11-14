@@ -24,6 +24,9 @@ pub(crate) struct RowRt {
     pub starting_proxy: bool,
     pub exporting: bool,
     pub restoring: bool,
+    /// The running check waits for this server name's handshake budget (lab live-9 L9-7):
+    /// said on the row instead of a silent minute; its result or the run's end clears it.
+    pub budget_wait: bool,
 }
 
 impl RowRt {
@@ -226,6 +229,25 @@ impl Store {
     pub fn row(&self, id: &str, f: impl FnOnce(&mut RowRt)) {
         let mut rows = self.rows;
         f(rows.write().entry(id.to_owned()).or_default());
+    }
+
+    /// A key check's result for a row: it no longer waits for its budget.
+    pub fn health_landed(&self, id: &str, health: KeyHealth) {
+        self.row(id, |r| {
+            r.health = Some(health);
+            r.budget_wait = false;
+        });
+    }
+
+    /// The rows of `ids` stop waiting for their budget (their check ended without a result).
+    pub fn waits_ended<'a>(&self, ids: impl IntoIterator<Item = &'a String>) {
+        let mut rows = self.rows;
+        let mut rows = rows.write();
+        for id in ids {
+            if let Some(r) = rows.get_mut(id) {
+                r.budget_wait = false;
+            }
+        }
     }
 
     /// Changes one group's busy flags.

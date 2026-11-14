@@ -274,6 +274,9 @@ pub(crate) fn ServerRow(server: ServerView, group: Option<GroupView>) -> Element
                         Badge { tone, title: t!(key), "{label}" }
                     }
                     span { class: "srv-row-addr", title: "{server.host}:{server.port}", "{server.host}:{server.port}" }
+                    if rt.budget_wait {
+                        Badge { tone: Tone::Unknown, {t!("ui.servers.row.budgetWait")} }
+                    }
                     if let (Some(exit), Some(title)) = (server.exit_ip, exit_title) {
                         span { class: "srv-row-exit", title: "{title}", {t!("ui.servers.row.exit", ip = exit)} }
                     }

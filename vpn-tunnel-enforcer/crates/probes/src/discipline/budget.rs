@@ -143,7 +143,8 @@ pub fn budget() -> &'static HandshakeBudget {
 impl HandshakeBudget {
     /// Takes one handshake slot for `endpoint`: returns at once when one is free, sleeps until
     /// the reserved slot when it starts within `max_wait`, else `Deferred` (nothing reserved).
-    /// A cancelled wait gives its slot back.
+    /// A cancelled wait gives its slot back, and so does one dropped before its slot (review
+    /// live2-a1: a caller's deadline left phantom handshakes that held the name's budget).
     pub async fn acquire(
         &self,
         endpoint: &Endpoint,
@@ -151,13 +152,18 @@ impl HandshakeBudget {
         cancel: &CancellationToken,
     ) -> Result<(), BudgetError> {
         let at = self.reserve_at(endpoint, Instant::now(), max_wait)?;
+        let pending = Pending {
+            budget: self,
+            endpoint,
+            at: Some(at),
+        };
         tokio::select! {
             biased;
-            () = cancel.cancelled() => {
-                self.release(endpoint, at);
-                Err(BudgetError::Cancelled)
+            () = cancel.cancelled() => Err(BudgetError::Cancelled),
+            () = tokio::time::sleep_until(at) => {
+                pending.used();
+                Ok(())
             }
-            () = tokio::time::sleep_until(at) => Ok(()),
         }
     }
 
@@ -211,6 +217,28 @@ impl HandshakeBudget {
     fn release(&self, endpoint: &Endpoint, at: Instant) {
         if let Some(slots) = self.slots.lock().get_mut(endpoint) {
             slots.at.retain(|&s| s != at);
+        }
+    }
+}
+
+/// A reserved slot not reached yet: given back when dropped (a cancel, a caller's deadline),
+/// kept once [`Pending::used`].
+struct Pending<'a> {
+    budget: &'a HandshakeBudget,
+    endpoint: &'a Endpoint,
+    at: Option<Instant>,
+}
+
+impl Pending<'_> {
+    fn used(mut self) {
+        self.at = None;
+    }
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        if let Some(at) = self.at {
+            self.budget.release(self.endpoint, at);
         }
     }
 }

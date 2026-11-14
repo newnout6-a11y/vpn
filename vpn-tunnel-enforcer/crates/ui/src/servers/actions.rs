@@ -129,6 +129,12 @@ impl Actions {
         let mut running = store.check_task;
         if let Some(task) = running.take() {
             task.cancel();
+            // The stopped run names no more rows; none waits for its budget any longer.
+            let waiting: Vec<String> = (store.rows.peek().iter())
+                .filter(|(_, r)| r.budget_wait)
+                .map(|(id, _)| id.clone())
+                .collect();
+            store.waits_ended(&waiting);
             return;
         }
         let (api, toasts) = (self.api.clone(), self.toasts);
@@ -136,21 +142,28 @@ impl Actions {
         done.set(0);
         let task = self.spawn(async move {
             let (tx, mut rx) = mpsc::unbounded_channel();
-            let run = api.check_all_health(tx);
+            let (wtx, mut wrx) = mpsc::unbounded_channel();
+            let run = api.check_all_health_watched(tx, wtx);
             futures_util::pin_mut!(run);
             let mut landed = |id: &str, health| {
-                store.row(id, |r| r.health = Some(health));
+                store.health_landed(id, health);
                 *done.write() += 1;
             };
+            let mut waited = Vec::new();
             let result = loop {
                 tokio::select! {
                     result = &mut run => break result,
                     Some((id, health)) = rx.recv() => landed(&id, health),
+                    Some(id) = wrx.recv() => {
+                        store.row(&id, |r| r.budget_wait = true);
+                        waited.push(id);
+                    }
                 }
             };
             while let Ok((id, health)) = rx.try_recv() {
                 landed(&id, health);
             }
+            store.waits_ended(&waited);
             let mut running = store.check_task;
             running.set(None);
             let title = translate_now("ui.servers.checkAll.done", &[]);

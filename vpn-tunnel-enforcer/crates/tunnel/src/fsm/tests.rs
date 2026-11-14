@@ -476,7 +476,14 @@ fn soft_needs_the_engine_and_the_tweaks() {
             setup(h);
             Effect::Ok
         }));
-        assert_eq!(h.snap().state, TunnelState::Error);
+        // Compensated: nothing of ours is left, so «Подключить» (lab live-9 L9-1); the
+        // operation keeps the failure.
+        let s = h.snap();
+        assert_eq!(s.state, TunnelState::Disconnected);
+        assert_eq!(
+            s.operation.and_then(|op| op.category),
+            Some(ErrorKind::Internal)
+        );
     }
     let mut h = H::new();
     assert!(h.connect_soft());
@@ -683,12 +690,15 @@ fn second_connect_over_native_is_not_admitted() {
 }
 
 /// A "successful" start or stop without evidence is published as an error, never as
-/// protection or a clean exit.
+/// protection or a clean exit. The compensated start left nothing of ours: its error is the
+/// operation's and the state offers «Подключить» (lab live-9 L9-1).
 #[test]
 fn unconfirmed_start_and_stop_end_in_error() {
     let mut h = H::new();
     assert!(!h.start(|_, _| Effect::Ok));
-    assert_eq!(h.snap().state, TunnelState::Error);
+    let s = h.snap();
+    assert_eq!(s.state, TunnelState::Disconnected);
+    assert_eq!(s.operation.map(|op| op.status), Some(OpStatus::Error));
     assert!(h.connect());
     assert!(!h.stop_with(false));
     assert_eq!(h.snap().state, TunnelState::Error);
@@ -715,6 +725,34 @@ fn a_clean_network_failure_leaves_a_way_forward() {
         h.native_up(PID);
         Effect::Fail(ErrorKind::Network)
     }));
+    assert_eq!(h.snap().state, TunnelState::Error);
+}
+
+/// Lab live-9 L9-1: a start refused inside our own machinery before any engine ran (a config
+/// the engine was never given) ends like a network failure: «Подключить», the op keeps its
+/// error; a refusal kind that is neither stays an error, and so does one that left an engine.
+#[test]
+fn a_clean_internal_failure_leaves_a_way_forward() {
+    let mut h = H::new();
+    assert!(!h.start(|_, _| Effect::Fail(ErrorKind::Internal)));
+    let s = h.snap();
+    assert_eq!(
+        (s.state, s.cleanup_required),
+        (TunnelState::Disconnected, false)
+    );
+    assert_eq!(
+        s.operation.and_then(|op| op.category),
+        Some(ErrorKind::Internal)
+    );
+    let mut h = H::new();
+    assert!(!h.start(|h, _| {
+        h.native_up(PID);
+        h.os.proxy_capture = true;
+        Effect::Fail(ErrorKind::Internal)
+    }));
+    assert_eq!(h.snap().state, TunnelState::Error);
+    let mut h = H::new();
+    assert!(!h.start(|_, _| Effect::Fail(ErrorKind::Validation)));
     assert_eq!(h.snap().state, TunnelState::Error);
 }
 
@@ -840,8 +878,9 @@ fn live_unowned_process_is_not_disconnected() {
     assert!(s.cleanup_required);
 }
 
-/// A start whose process came up without a PID is not confirmed: the lane compensates once and
-/// the machine ends in `error` with no transition.
+/// A start whose process came up without a PID is not confirmed: the lane compensates once and,
+/// with nothing of ours left, the machine ends `disconnected` with no transition (lab live-9
+/// L9-1: an internal start failure offers «Подключить», the op keeps its error).
 #[test]
 fn unconfirmed_start_is_compensated() {
     let mut h = H::new();
@@ -857,7 +896,7 @@ fn unconfirmed_start_is_compensated() {
     assert_eq!(cleanups, 1);
     assert_eq!(h.os, Evidence::default());
     let s = h.snap();
-    assert_eq!((s.state, s.transition), (TunnelState::Error, None));
+    assert_eq!((s.state, s.transition), (TunnelState::Disconnected, None));
 }
 
 /// A transient evidence failure during a start is retained until an owned recovery, even when

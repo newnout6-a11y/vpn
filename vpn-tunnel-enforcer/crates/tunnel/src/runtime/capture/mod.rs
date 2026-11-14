@@ -139,6 +139,11 @@ pub trait Capture: Send + Sync {
     fn guard(&self, plan: &CapturePlan) -> KillSwitchLevel {
         plan.guard
     }
+    /// Loopback ports `plan`'s capture listens on itself (a proxy capture's mixed port, kept
+    /// for the whole session): every other port of the start is allocated around them.
+    fn ports(&self, _plan: &CapturePlan) -> Vec<u16> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

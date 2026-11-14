@@ -693,7 +693,10 @@ pub async fn accept(files: &RuleSetFiles, engine: &Path, store: &Path, reference
     // service side: shape + canaries + content bounds against `reference` (its pinned copies) with ITS
     // sing-box, flushed and renamed to store\gen-<digest16>-c<checks>; a stored folder is reused only
     // while its files hash to the set (psmart-a4) and only by the same checks (fixlists-a7); the
-    // digest is noted in store\accepted
+    // digest is noted in store\accepted. Lab live-9 L9-2: the files are checked side by side (each file's
+    // own checks unchanged, the verdict read in file order) and a file's decompile runs beside its
+    // reference copy's. Review live2-a4: the blocked lists' kept share counts only unconditioned rules
+    // (matcher keys alone: no port, network, invert or logical rule).
 pub async fn recall(store: &Path) -> Option<(String, PathBuf)>;  // the noted set after a restart, while
     // its folder still hashes to it (fixlists-a5)
 pub fn prune_store(store: &Path, keep: &[&Path]);      // blocking; removes the other gen-* folders

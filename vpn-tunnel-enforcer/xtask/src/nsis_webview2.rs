@@ -42,8 +42,9 @@ fn code(text: &str) -> Vec<&str> {
 }
 
 /// The shipped branch: Microsoft's documented keys (64-bit Windows), the pinned bootstrapper with `/silent
-/// /install` in this order, started with ExecWait (CreateProcess, so never an elevation prompt), after the files
-/// are in place; setup never stops or shows a box here.
+/// /install` in this order, started with CreateProcess (never an elevation prompt) after the files are in place
+/// and waited for only after the service step (lab live-9 L9-9: it runs beside the rest of setup); setup never
+/// stops or shows a box here.
 #[test]
 fn shipped_branch_uses_the_documented_keys_and_the_pinned_bootstrapper() {
     let nsh = read("installer/webview2.nsh");
@@ -64,7 +65,17 @@ fn shipped_branch_uses_the_documented_keys_and_the_pinned_bootstrapper() {
         .replace('/', r"\");
     let run = format!(r#"!define WV2_RUN '"$INSTDIR\{pinned}" /silent /install'"#);
     assert!(lines.contains(&run.as_str()), "{run}");
-    assert!(lines.contains(&"ExecWait '${WV2_RUN}' $R1"));
+    assert!(lines.contains(&"StrCpy $R3 '${WV2_RUN}'"));
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("kernel32::CreateProcessW(p 0, t R3,"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("kernel32::WaitForSingleObject(p $WebView2Process, i -1)"))
+    );
     for banned in [
         "Abort",
         "Quit",
@@ -80,11 +91,17 @@ fn shipped_branch_uses_the_documented_keys_and_the_pinned_bootstrapper() {
         );
     }
     let nsi = read("installer/vpnte.nsi");
-    let files = nsi.find(r#"File /r "${STAGE}\resources\*""#).unwrap();
-    let call = nsi.find("  Call EnsureWebView2\n").unwrap();
+    let at = |needle: &str| nsi.find(needle).unwrap_or_else(|| panic!("{needle}"));
+    let files = at(r#"File /r "${STAGE}\resources\*""#);
+    let (start, service) = (at("  Call StartWebView2\n"), at("  Call InstallService\n"));
+    let wait = at("  Call EnsureWebView2\n");
     assert!(
-        files < call,
+        files < start,
         "the bootstrapper must be installed before it runs"
+    );
+    assert!(
+        start < service && service < wait,
+        "it runs beside the service step"
     );
     assert!(
         nsi.contains(r#"!define MUI_FINISHPAGE_TEXT "$(MUI_TEXT_FINISH_INFO_TEXT)$WebView2Note""#)
@@ -107,12 +124,14 @@ impl Drop for ScratchKey {
 }
 
 /// One run of the branch: the registry state before, the stand-in "bootstrapper" command line, and the outcome
-/// as `(version found, exit code, finish-page note shown)`.
+/// as `(version found, exit code, finish-page note shown)`; `beside`: the stand-in must still run when
+/// `StartWebView2` returned (setup goes on meanwhile).
 struct Case<'a> {
     machine: Option<&'a str>,
     user: Option<&'a str>,
     run: String,
     expect: (&'a str, &'a str, bool),
+    beside: bool,
 }
 
 /// The branch's decisions, run for real with the pinned NSIS (fetched like `cargo xtask nsis`; skipped when it
@@ -141,36 +160,52 @@ fn branch_decisions_run_against_a_scratch_key() {
             user: None,
             run: format!(r#"{reg} add "HKCU\{k}\ran" /f"#),
             expect: ("120.0.2210.91", "", false),
+            beside: false,
         },
         Case {
             machine: Some("0.0.0.0"),
             user: Some("121.0.1"),
             run: format!(r#"{reg} add "HKCU\{k}\ran" /f"#),
             expect: ("121.0.1", "", false),
+            beside: false,
         },
         Case {
             machine: Some(""),
             user: None,
             run: format!(r#"{reg} add "HKCU\{k}\user" /v pv /d 1.2.3.4 /f"#),
             expect: ("1.2.3.4", "0", false),
+            beside: false,
         },
         Case {
             machine: None,
             user: Some("0.0.0.0"),
             run: format!(r#"{reg} query "HKCU\{k}\absent""#),
             expect: ("", "1", true),
+            beside: false,
         },
         Case {
             machine: None,
             user: None,
             run: r#""$TEMP\vpnte-no-such-bootstrapper.exe" /silent /install"#.to_owned(),
             expect: ("", "error", true),
+            beside: false,
         },
         Case {
             machine: None,
             user: None,
             run: format!(r#"{reg} query "HKCU\{k}""#),
             expect: ("", "0", true),
+            beside: false,
+        },
+        // Lab live-9 L9-9: a slow bootstrapper (2 s here) runs while setup goes on; the end waits for it.
+        Case {
+            machine: None,
+            user: None,
+            run: format!(
+                r#""$SYSDIR\cmd.exe" /c ping -n 3 127.0.0.1 >nul & reg add HKCU\{k}\user /v pv /d 5.6.7.8 /f"#
+            ),
+            expect: ("5.6.7.8", "0", false),
+            beside: true,
         },
     ];
     let scratch = root.join("target/xtask/test-scratch/nsis-webview2");
@@ -184,12 +219,16 @@ fn branch_decisions_run_against_a_scratch_key() {
                 base.create(sub).unwrap().set_string("pv", value).unwrap();
             }
         }
-        let (version, exit, note) = run_case(&makensis, &scratch, k, i, &case.run);
+        let (running, version, exit, note) = run_case(&makensis, &scratch, k, i, &case.run);
         let (want_version, want_exit, want_note) = case.expect;
         assert_eq!(
             (version.as_str(), exit.as_str(), note),
             (want_version, want_exit, want_note),
             "case {i}"
+        );
+        assert!(
+            running || !case.beside,
+            "case {i}: setup waited for the bootstrapper"
         );
         // Found runtime = the bootstrapper never ran.
         let ran = CURRENT_USER.open(format!(r"{k}\ran")).is_ok();
@@ -209,7 +248,7 @@ fn run_case(
     key: &str,
     i: usize,
     run: &str,
-) -> (String, String, bool) {
+) -> (bool, String, String, bool) {
     let exe = scratch.join(format!("wv2-case-{i}.exe"));
     let out = scratch.join(format!("wv2-case-{i}.txt"));
     let nsh = root().join("installer/webview2.nsh");
@@ -219,7 +258,9 @@ fn run_case(
          !define WV2_USER_KEY \"{key}\\user\"\n!define WV2_RUN '{run}'\n!define WV2_SETTLE_SECONDS 2\n\
          !include \"{nsh}\"\nLangString WebView2Installing 1033 \"installing\"\n\
          LangString WebView2Later 1033 \"later\"\nFunction .onInit\n  SetRegView 64\nFunctionEnd\n\
-         Section\n  Call EnsureWebView2\n  FileOpen $0 \"{out}\" w\n  FileWrite $0 \"$R0|$R1|$WebView2Note\"\n\
+         Section\n  Call StartWebView2\n  StrCpy $5 \"\"\n  ${{If}} $WebView2Process != \"\"\n\
+         System::Call 'kernel32::WaitForSingleObject(p $WebView2Process, i 0) i .r5'\n  ${{EndIf}}\n\
+         Call EnsureWebView2\n  FileOpen $0 \"{out}\" w\n  FileWrite $0 \"$5|$R0|$R1|$WebView2Note\"\n\
          FileClose $0\nSectionEnd\n",
         exe = win(&exe),
         nsh = win(&nsh),
@@ -248,7 +289,9 @@ fn run_case(
         std::thread::sleep(Duration::from_millis(100));
     }
     let text = fs::read_to_string(&out).unwrap();
-    let mut parts = text.splitn(3, '|');
+    let mut parts = text.splitn(4, '|');
+    // WAIT_TIMEOUT: the stand-in still ran when StartWebView2 returned.
+    let running = parts.next() == Some("258");
     let version = parts.next().unwrap_or_default().to_owned();
     let exit = parts.next().unwrap_or_default().to_owned();
     let note = parts.next().unwrap_or_default();
@@ -256,5 +299,5 @@ fn run_case(
         note.is_empty() || note == "\r\n\r\nlater",
         "case {i}: note {note:?}"
     );
-    (version, exit, !note.is_empty())
+    (running, version, exit, !note.is_empty())
 }

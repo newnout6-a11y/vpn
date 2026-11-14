@@ -347,7 +347,9 @@ impl Actor {
                 #[cfg(feature = "lab")]
                 if engine == Engine::Mihomo {
                     let engines = &*self.deps.engines;
-                    let (plan, warnings) = super::mihomo::plan(engines, profile, op).await?;
+                    let held = work.plan.as_ref().map(|p| self.capture.ports(p));
+                    let held = held.unwrap_or_default();
+                    let (plan, warnings) = super::mihomo::plan(engines, profile, &held, op).await?;
                     work.warnings.extend(warnings);
                     return Ok(Planned::Mihomo(Box::new(plan)));
                 }
@@ -404,7 +406,11 @@ impl Actor {
         avoid: &[String],
         work: &mut Work,
     ) -> AppResult<Box<Session>> {
-        let user = self.deps.inputs.snapshot().await?;
+        // Lab live-9 L9-2: the helper service checks a handed-over Smart RU set inside this
+        // snapshot (4.7 s of a first connect); only the sing-box config needs it, so it is read
+        // beside the capture, the upstream plan and slot A, and awaited at the config.
+        let inputs = self.deps.inputs.clone();
+        let user = tokio::spawn(async move { inputs.snapshot().await });
         // Decided once, before any effect: the run, the receipt and the status show this engine.
         let engine = run_of(req)?;
         #[cfg(feature = "lab")]
@@ -450,8 +456,9 @@ impl Actor {
                 resolved,
                 profile,
             } => {
+                let held = self.capture.ports(&plan);
                 let settle = self
-                    .start_slot_a(graph, resolved, profile, op, work)
+                    .start_slot_a(graph, resolved, profile, &held, op, work)
                     .await?;
                 let a = work
                     .slots
@@ -480,6 +487,9 @@ impl Actor {
             self.start_mihomo(plan, op, work).await?;
         }
         let local = matches!(planned, Planned::Local { .. });
+        let step = Instant::now();
+        let user = user.await.map_err(AppError::internal)??;
+        tracing::info!(ms = ms_since(step), "routing inputs ready");
         let (routing, warnings) = config::routing(&user, &engine_paths, local, &phys_dns, hostname);
         work.warnings.extend(warnings);
         let parts = Parts {
@@ -591,11 +601,13 @@ impl Actor {
         graph: &ProxyGraph,
         resolved: &Resolved,
         profile: &VpnProfile,
+        held: &[u16],
         op: &CancellationToken,
         work: &mut Work,
     ) -> AppResult<Option<Duration>> {
-        let a = SlotEndpoint::allocate(&[])?;
-        let b = SlotEndpoint::allocate(&[a.port()])?;
+        // `held`: the capture's own listener (L9-1), never handed to a slot.
+        let a = SlotEndpoint::allocate(held)?;
+        let b = SlotEndpoint::allocate(&[held, &[a.port()]].concat())?;
         let settle = settle_of(graph);
         let (tx, rx) = mpsc::channel(8);
         work.events = Some(rx);

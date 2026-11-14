@@ -435,6 +435,8 @@ pub(super) fn echo_failure(err: &AppError) -> Option<EchoFailure> {
 /// failed. With `admit`, every request first takes a handshake slot of the server behind the
 /// route (each is a new connection; an unbudgeted retry against a freezing server extends the
 /// freeze); a refused slot starts nothing more and, with nothing else in flight, is the answer.
+/// Review live2-a1: the first slot is taken before any clock runs, so a wait for the budget is
+/// never read as a silent server; a refusal there is the budget's own "retry in N s".
 async fn echo(
     route: &Route,
     urls: &[&str],
@@ -446,12 +448,16 @@ async fn echo(
     let client = vpnte_base::http::offline(builder_for(route, budget.total)?)
         .build()
         .map_err(|e| AppError::internal(e.without_url()))?;
-    // One request: its handshake slot first (with `admit`), then a plain-text address.
-    let ask = |url: &str| {
+    if let Some((gate, server)) = admit {
+        gate.admit(server, cancel).await?;
+    }
+    // One request: its handshake slot first (with `admit`, unless taken already), then a
+    // plain-text address.
+    let ask = |url: &str, admitted: bool| {
         let request = client.get(url);
         let service = url.to_owned();
         async move {
-            if let Some((gate, server)) = admit {
+            if let Some((gate, server)) = admit.filter(|_| !admitted) {
                 gate.admit(server, cancel).await.map_err(Asked::Refused)?;
             }
             let sent = std::time::Instant::now();
@@ -480,7 +486,7 @@ async fn echo(
     // A balancer behind the route still picks members its observatory has not judged.
     let mut settled = budget.settle.is_none();
     if let Some(url) = next.next() {
-        flight.push(ask(url));
+        flight.push(ask(url, true));
     }
     loop {
         tokio::select! {
@@ -489,7 +495,7 @@ async fn echo(
             () = &mut hedge, if !hedged => {
                 hedged = true;
                 if let Some(url) = next.next() {
-                    flight.push(ask(url));
+                    flight.push(ask(url, false));
                 }
             }
             // The observatory has judged every member: one more connection goes where the
@@ -497,7 +503,7 @@ async fn echo(
             () = &mut settle, if !settled => {
                 settled = true;
                 if let Some(url) = urls.first() {
-                    flight.push(ask(url));
+                    flight.push(ask(url, false));
                 }
             }
             Some(got) = flight.next() => match got {
@@ -515,7 +521,7 @@ async fn echo(
                     // request in flight before the balancer settles.
                     hedged = true;
                     if let Some(url) = next.next() {
-                        flight.push(ask(url));
+                        flight.push(ask(url, false));
                     }
                 }
             },
@@ -967,5 +973,59 @@ connection: close
             .unwrap_err();
         assert_eq!(failure(&err), Some(EchoFailure::NoAddress));
         assert!(started.elapsed() < Duration::from_secs(5), "not the hedge");
+    }
+
+    /// A gate that takes `wait` before it admits, or refuses (the budget's "retry in N s").
+    struct SlowGate {
+        wait: Duration,
+        refuse: bool,
+    }
+
+    #[async_trait]
+    impl HandshakeGate for SlowGate {
+        async fn admit(&self, _server: &Profile, _cancel: &CancellationToken) -> AppResult<()> {
+            tokio::time::sleep(self.wait).await;
+            if self.refuse {
+                let msg = Msg::new("probes.discipline.deferred");
+                return Err(AppError::msg(ErrorKind::Conflict, msg));
+            }
+            Ok(())
+        }
+        fn ready_now(&self, _server: &Profile) -> bool {
+            false
+        }
+    }
+
+    /// Review live2-a1: a handshake slot that comes later than the whole proof budget is no
+    /// silent server: the request goes out once admitted and its answer counts; a refused slot
+    /// is the budget's own answer, never `egressUnknown` (so never exitSilent or a quiet window).
+    #[tokio::test]
+    async fn a_budget_wait_is_not_a_silent_server() {
+        let (url, hits) = service(Some((200, "198.51.100.9")), Duration::ZERO).await;
+        let link = "trojan://fake-pass@203.0.113.30:443?sni=gate.example.net#Gate";
+        let server = vpnte_profiles::uri::parse_uri(link).expect("fake key parses");
+        let token = CancellationToken::new();
+        let slow = SlowGate {
+            wait: Duration::from_millis(400),
+            refuse: false,
+        };
+        let admit = Some((&slow as &dyn HandshakeGate, &server));
+        let ip = echo(&Route::Direct, &[&url], budget(200, 100), admit, &token).await;
+        assert_eq!(ip.unwrap(), IpAddr::from([198, 51, 100, 9]));
+        let refused = SlowGate {
+            wait: Duration::from_millis(50),
+            refuse: true,
+        };
+        let admit = Some((&refused as &dyn HandshakeGate, &server));
+        let err = echo(&Route::Direct, &[&url], budget(200, 100), admit, &token)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Conflict);
+        assert_eq!(failure(&err), None);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "a refused slot dials nothing"
+        );
     }
 }

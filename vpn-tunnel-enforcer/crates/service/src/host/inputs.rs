@@ -5,6 +5,8 @@
 //! files of the install folder. A SYSTEM process never reads a user's folder, so the app sends
 //! the bytes.
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -81,8 +83,10 @@ impl SharedInputs {
         self.report.lock().clone()
     }
 
-    /// Replaces the inputs (`level`: the kill-switch level they run under).
-    pub fn set(&self, routing: &RoutingInputs, level: KillSwitchLevel) {
+    /// Replaces the inputs (`level`: the kill-switch level they run under). A handed-over set
+    /// is checked at once in the background (lab live-9 L9-2: the check took 4.7 s inside the
+    /// first start); a start finds it accepted by its digest, or waits only for the rest.
+    pub fn set(self: &Arc<Self>, routing: &RoutingInputs, level: KillSwitchLevel) {
         *self.current.lock() = UserInputs {
             smart_ru: routing.smart_ru,
             smart_ru_maps_direct: routing.smart_ru_maps_direct,
@@ -101,6 +105,15 @@ impl SharedInputs {
             auto_restart_on_crash: routing.auto_restart_on_crash,
         };
         *self.handed.lock() = routing.rule_sets.clone();
+        if routing.smart_ru
+            && routing.rule_sets.is_some()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            let this = Arc::clone(self);
+            runtime.spawn(async move {
+                this.choose().await;
+            });
+        }
     }
 
     /// Keeps the inputs, changes the kill-switch level.
@@ -163,13 +176,15 @@ impl SharedInputs {
         {
             return fallback(why.clone());
         }
+        let step = Instant::now();
         match handover::accept(&files, engine, store, reference).await {
             Ok(dir) => {
+                let ms = step.elapsed().as_millis();
                 // The previous folder stays: a protected restart starts the new engine while the
                 // old one still reads its files.
                 let previous = previous.as_ref().map(|(_, dir)| dir.clone());
                 prune(store.clone(), [Some(dir.clone()), previous]).await;
-                tracing::info!(%digest, "handed-over Smart RU lists in use");
+                tracing::info!(%digest, ms, "handed-over Smart RU lists in use");
                 checked.accepted = Some((digest.clone(), dir.clone()));
                 (Some(dir), handed(RuleSetSource::Handed, digest, None))
             }
@@ -211,7 +226,10 @@ impl InputsSource for SharedInputs {
     async fn snapshot(&self) -> AppResult<UserInputs> {
         let mut inputs = self.get();
         let report = if inputs.smart_ru {
+            let step = Instant::now();
             let (dir, report) = self.choose().await;
+            let ms = step.elapsed().as_millis();
+            tracing::info!(ms, source = ?report.source, "Smart RU lists ready");
             if let Some(dir) = dir {
                 inputs.rule_set_dir = Some(dir);
             }

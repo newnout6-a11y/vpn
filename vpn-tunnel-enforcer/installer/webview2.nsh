@@ -41,25 +41,69 @@ Function WebView2Version
   ${EndIf}
 FunctionEnd
 
-; Leaves $R0 = the runtime's version ("" = still missing) and $R1 = the bootstrapper's exit code ("" = not run,
-; "error" = could not be started). Never aborts.
-Function EnsureWebView2
-  StrCpy $WebView2Note ""
-  StrCpy $R1 ""
+; Lab live-9 L9-9: on a clean Windows the bootstrapper takes ~95 s (it downloads the runtime), so it runs beside
+; the rest of setup: StartWebView2 right after the files are in place, EnsureWebView2 at the end waits for it.
+Var WebView2Process ; the running bootstrapper's process handle, "" when none runs
+Var WebView2Exit    ; "" = not run (the runtime was there), "error" = could not be started
+Var WebView2Started ; 1 once StartWebView2 ran
+
+; Starts the bootstrapper when the runtime is missing and returns at once. CreateProcess, as ExecWait does: a
+; program that asked for elevation would fail here, never prompt. Not nsExec: Edge Update leaves a process
+; behind that would keep nsExec's output pipe open until its timeout.
+Function StartWebView2
+  StrCpy $WebView2Started 1
+  StrCpy $WebView2Process ""
+  StrCpy $WebView2Exit ""
   Call WebView2Version
   ${If} $R0 != ""
     DetailPrint "WebView2 runtime $R0 found"
     Return
   ${EndIf}
   DetailPrint "$(WebView2Installing)"
-  ; ExecWait starts the program with CreateProcess: one that asked for elevation would fail here, never prompt.
-  ; Not nsExec: Edge Update leaves a process behind that would keep nsExec's output pipe open until its timeout.
-  ClearErrors
-  ExecWait '${WV2_RUN}' $R1
-  ${If} ${Errors}
-    StrCpy $R1 "error"
+  Push $R3
+  Push $R4
+  Push $R5
+  Push $R6
+  StrCpy $R3 '${WV2_RUN}'
+  ; STARTUPINFOW (cb filled in by &l4) and PROCESS_INFORMATION of this 32-bit installer. CREATE_NO_WINDOW
+  ; (0x08000000): no console window if the program is a console one; the bootstrapper shows nothing anyway.
+  System::Call '*(&l4,i,i,i,i,i,i,i,i,i,i,i,&i2,&i2,i,i,i,i) p .R4'
+  System::Call '*(p,p,i,i) p .R5'
+  System::Call 'kernel32::CreateProcessW(p 0, t R3, p 0, p 0, i 0, i 0x08000000, p 0, p 0, p R4, p R5) i .R6'
+  ${If} $R6 == 0
+    StrCpy $WebView2Exit "error"
+  ${Else}
+    System::Call '*$R5(p .R6, p .R3)'
+    System::Call 'kernel32::CloseHandle(p R3)'
+    StrCpy $WebView2Process $R6
+  ${EndIf}
+  System::Free $R4
+  System::Free $R5
+  Pop $R6
+  Pop $R5
+  Pop $R4
+  Pop $R3
+FunctionEnd
+
+; Waits for the bootstrapper StartWebView2 started (started here when it was not) and leaves $R0 = the runtime's
+; version ("" = still missing) and $R1 = the bootstrapper's exit code ("" = not run, "error" = could not be
+; started). Never aborts.
+Function EnsureWebView2
+  ${If} $WebView2Started != 1
+    Call StartWebView2
+  ${EndIf}
+  StrCpy $WebView2Note ""
+  StrCpy $R1 $WebView2Exit
+  ${If} $WebView2Process != ""
+    System::Call 'kernel32::WaitForSingleObject(p $WebView2Process, i -1)'
+    System::Call 'kernel32::GetExitCodeProcess(p $WebView2Process, *i .R1)'
+    System::Call 'kernel32::CloseHandle(p $WebView2Process)'
+    StrCpy $WebView2Process ""
   ${EndIf}
   Call WebView2Version
+  ${If} $R1 == ""
+    Return
+  ${EndIf}
   ; The bootstrapper can exit 0 before the runtime is registered (WebView2Feedback #1349, still open in 2026):
   ; Microsoft's advice is to wait for the registry value.
   ${If} $R1 == 0

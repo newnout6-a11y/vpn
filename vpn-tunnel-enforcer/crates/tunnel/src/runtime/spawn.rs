@@ -42,7 +42,10 @@ impl Actor {
         work: &mut Work,
     ) -> AppResult<Ready> {
         let slot_eps = work.slots.as_ref().map(|s| s.endpoints.clone());
-        let taken: Vec<u16> = slot_eps.iter().flatten().map(SlotEndpoint::port).collect();
+        // Lab live-9 L9-1: every port of the start is allocated around the capture's own
+        // listener and the slots', so the config's listeners are distinct by construction.
+        let mut taken = self.capture.ports(p.plan);
+        taken.extend(slot_eps.iter().flatten().map(SlotEndpoint::port));
         // WP-12 lab: the mihomo run already up (held by the start) is chained with each core,
         // and its ports stay out of sing-box's listeners.
         #[cfg(feature = "lab")]

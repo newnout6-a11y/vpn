@@ -153,10 +153,18 @@ async fn check_into(
     let _ = tokio::fs::remove_dir_all(&staging).await;
     tokio::fs::create_dir_all(&staging).await.map_err(storage)?;
     let checked = async {
-        for (f, (tag, _, _)) in files.files.iter().zip(RULE_SETS) {
-            let path = staging.join(&f.name);
-            write_synced(&path, &f.data).await.map_err(storage)?;
-            match validate(engine, &path, tag, reference).await {
+        let paths: Vec<PathBuf> = files.files.iter().map(|f| staging.join(&f.name)).collect();
+        for (f, path) in files.files.iter().zip(&paths) {
+            write_synced(path, &f.data).await.map_err(storage)?;
+        }
+        // Lab live-9 L9-2: one engine run after another made 4.7 s of a first connect. The
+        // files are checked side by side, each with every check it had; the verdict is read in
+        // file order, so the answer is the one a check in turn would give.
+        let checks = paths.iter().zip(RULE_SETS);
+        let checks = checks.map(|(path, (tag, _, _))| validate(engine, path, tag, reference));
+        let verdicts = futures_util::future::join_all(checks).await;
+        for (f, verdict) in files.files.iter().zip(verdicts) {
+            match verdict {
                 Some(true) => {}
                 Some(false) => return Err(invalid(&f.name)),
                 None => return Err(RefreshFault::EngineUnavailable),

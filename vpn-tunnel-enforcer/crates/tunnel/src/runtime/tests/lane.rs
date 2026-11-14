@@ -302,3 +302,23 @@ async fn stop_escalation_and_refusal() {
     assert_ne!(preserved.operation_id, full.operation_id);
     assert_eq!(w.count("release"), 1);
 }
+
+/// Lab live-9 L9-2: a slow inputs snapshot (the service checking a handed-over Smart RU set)
+/// runs beside the capture, slot A and its exit proof; the core's config waits for it.
+#[tokio::test]
+async fn the_inputs_are_read_beside_slot_a() {
+    let w = World::new();
+    w.inputs_ms.store(300, Ordering::SeqCst);
+    let h = spawn(&w);
+    let req = vpn_req(XRAY_KEY, vpnte_base::types::EnginePref::Xray);
+    h.start(req, CancellationToken::new())
+        .await
+        .expect("slot start");
+    let log = w.log();
+    let at = |prefix: &str| {
+        let found = log.iter().position(|l| l.starts_with(prefix));
+        found.unwrap_or_else(|| panic!("no {prefix} in {log:?}"))
+    };
+    let (proof, inputs, core) = (at("egress-via:"), at("inputs-done"), at("spawn:"));
+    assert!(proof < inputs && inputs < core, "{log:?}");
+}

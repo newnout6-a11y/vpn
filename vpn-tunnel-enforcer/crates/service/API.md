@@ -174,6 +174,9 @@ Certificates (p-speed, lab F-3): `Host::serve` turns `vpnte_base::http::verify_o
 whole service process: its HTTPS (DoH of server names, exit proofs) runs under the kill switch's DNS
 block, where Windows' online revocation fetch stalls; rustls checks chains and names against the
 bundled Mozilla roots and the Windows root store instead (revocation was soft-fail anyway).
+Lab live-9 L9-2: `SharedInputs::set(self: &Arc<Self>, ..)` starts the check of a handed-over set in
+the background the moment it arrives (start, restart or `Inputs` request); a start's snapshot finds it
+accepted by digest or waits only for the rest (`Smart RU lists ready ms=..`; the accept logs `ms`).
 Smart RU's lists (re-check item 12a): `host::SharedInputs` keeps the last `rule_sets` and checks
 them at the next engine start (`InputsSource::snapshot`): the service's own pinned set as is (no
 copy); another set once per content (`rulesets::handover::accept`: names, 2 MiB cap, canaries and

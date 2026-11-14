@@ -303,3 +303,43 @@ async fn proxy_switch_reads_the_egress_through_the_mixed_inbound() {
         w.log()
     );
 }
+
+/// Every loopback port a config names (listeners, dial targets, the controller).
+fn loopback_ports(v: &Value, out: &mut Vec<u16>) {
+    match v {
+        Value::Object(map) => {
+            for (key, value) in map {
+                let port = value.as_u64().and_then(|p| u16::try_from(p).ok());
+                match (key.as_str(), port) {
+                    ("listen_port" | "server_port" | "port", Some(p)) => out.push(p),
+                    _ => loopback_ports(value, out),
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|i| loopback_ports(i, out)),
+        _ => {}
+    }
+}
+
+/// Lab live-9 L9-1: a start's own ports (Xray slots A and B, the controller, the authenticated
+/// inbounds, the bootstrap resolver) are allocated around the capture's own listener. Half of
+/// the range is held here, so a start that ignored it would land in it with p ~ 98 %.
+#[tokio::test]
+async fn a_start_allocates_around_the_capture_listener() {
+    let w = World::new();
+    let held: Vec<u16> = (32_500..vpnte_engine::ports::PORT_RANGE.end).collect();
+    *w.held_ports.lock() = held.clone();
+    let h = TunnelHandle::spawn(deps(&w));
+    let req = vpn_req(XRAY_KEY, vpnte_base::types::EnginePref::Auto);
+    h.start(req, CancellationToken::new())
+        .await
+        .expect("slot start");
+    let mut ports = vec![clash_port(&config(&w, 0))];
+    loopback_ports(&config(&w, 0), &mut ports);
+    loopback_ports(&w.xray_configs.lock()[0], &mut ports);
+    ports.retain(|p| vpnte_engine::ports::PORT_RANGE.contains(p));
+    ports.sort_unstable();
+    ports.dedup();
+    assert!(ports.len() >= 5, "slots, controller, inbounds: {ports:?}");
+    assert!(ports.iter().all(|p| !held.contains(p)), "{ports:?}");
+}

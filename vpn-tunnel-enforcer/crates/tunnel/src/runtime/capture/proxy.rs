@@ -124,6 +124,12 @@ impl Capture for ProxyCapture {
         Ok(())
     }
 
+    /// Lab live-9 L9-1: the mixed port is free to bind between the session's engine runs, so
+    /// the start's other listeners must be told about it, or a random pick lands on it.
+    fn ports(&self, plan: &CapturePlan) -> Vec<u16> {
+        plan_port(plan).into_iter().collect()
+    }
+
     async fn ready(
         &self,
         plan: &CapturePlan,
