@@ -15,7 +15,6 @@
       "reason": {
         "external": "Encryption is handled by the external local proxy",
         "reality": "Reality does not use TLS fragmentation",
-        "xray": "TLS fragmentation is not available with the Xray engine",
         "realityKeyMismatch": "The server rejects the key (REALITY verification failed). The key is probably outdated: update the subscription or re-import the key, or choose another server.",
         "tlsHandshakeFailed": "The server fails the TLS check: it may be down or its settings may have changed. Try another server.",
         "upstreamUnreachable": "The server does not respond. Try another server or check the subscription.",

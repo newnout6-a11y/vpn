@@ -1,8 +1,13 @@
-//! Fetching the feed (research §4.4): every mirror in order, each through the session first and
-//! then directly; the first fresh feed whose signature verifies wins. A mirror that serves an
-//! older `seq` than we already accepted is skipped (a stale cache, or a replay); a feed past
-//! [`MAX_FEED_AGE`] is kept only as the "stale" answer when nothing fresher exists.
+//! Fetching the feed (research §4.4): the mirrors in order, each through the session first and
+//! then directly; the first fresh feed whose signature verifies wins. A mirror that has not
+//! answered within [`HEAD_START`] no longer holds up the next one (ops5), so a frozen mirror costs
+//! seconds, not [`crate::net::FEED_TIMEOUT`] per way. A mirror that serves an older `seq` than we
+//! already accepted is passed over (a stale cache, or a replay); a feed past [`MAX_FEED_AGE`] is
+//! kept only as the "stale" answer when nothing fresher exists.
+use std::time::Duration;
+
 use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use jiff::Timestamp;
 use minisign_verify::PublicKey;
 use serde::{Deserialize, Serialize};
@@ -13,6 +18,10 @@ use crate::policy::MAX_FEED_AGE;
 
 /// A feed is a few KB; anything far larger is not ours.
 const FEED_CAP: usize = 1 << 20;
+/// How long the next mirror waits for the ones before it. Was a whole [`crate::net::FEED_TIMEOUT`]
+/// (20 s) per mirror and way in turn: a hanging raw.githubusercontent.com cost 40 s, the worst
+/// case 120 s.
+const HEAD_START: Duration = Duration::from_secs(3);
 const SIG_CAP: usize = 4096;
 
 /// Where an accepted feed came from: the mirror's host and the way.
@@ -77,59 +86,127 @@ pub async fn fetch_feed(
     keys: &[PublicKey],
     max_seq: u64,
 ) -> Result<Fetched, FetchError> {
-    let mut stale: Option<Fetched> = None;
-    let mut error = FetchError::Unreachable;
-    for base in bases {
-        for way in ways {
-            let Some((bytes, sig)) = get_pair(way, base).await else {
-                continue;
-            };
-            let feed = match verify(&bytes, &sig, keys) {
-                Ok(feed) => feed,
-                Err(err) => {
-                    tracing::warn!(%err, via = ?way.via, mirror = host(base), "feed refused");
-                    error = FetchError::Refused(err);
-                    // A different way may avoid whoever altered it.
-                    continue;
+    let mut verdict = Verdict::default();
+    let mut pending = bases.iter();
+    let mut running = FuturesUnordered::new();
+    let mut start = true;
+    loop {
+        if std::mem::take(&mut start)
+            && let Some(base) = pending.next()
+        {
+            running.push(mirror(base, ways, keys, max_seq));
+        }
+        if running.is_empty() {
+            return verdict.finish();
+        }
+        tokio::select! {
+            Some(answer) = running.next() => {
+                if let Some(fresh) = verdict.add(answer) {
+                    return Ok(fresh);
                 }
-            };
-            let fresh = freshness(&feed, max_seq, Timestamp::now());
-            let fetched = Fetched {
-                feed,
-                bytes,
-                sig,
-                source: Source {
-                    host: host(base),
-                    via: way.via,
-                },
-                stale: fresh == Freshness::Stale,
-            };
-            match fresh {
-                Freshness::Fresh => return Ok(fetched),
-                Freshness::Older => {
-                    if error == FetchError::Unreachable {
-                        error = FetchError::Older;
-                    }
-                }
-                Freshness::Stale => {
-                    if stale.as_ref().is_none_or(|s| s.feed.seq < fetched.feed.seq) {
-                        stale = Some(fetched);
-                    }
-                }
+                // An answer without a fresh feed: the next mirror need not wait.
+                start = true;
             }
-            // The same mirror serves the same file on the other way: next mirror.
-            break;
+            () = tokio::time::sleep(HEAD_START), if pending.len() > 0 => start = true,
         }
     }
-    stale.ok_or(error)
 }
 
-/// `update.json` and its signature from `base`, or `None` on any network or HTTP failure.
+/// How one mirror ended.
+enum Answer {
+    Fresh(Fetched),
+    Stale(Fetched),
+    Older,
+    Refused(FeedError),
+    Unreachable,
+}
+
+/// What the mirrors that ended said: the newest stale feed and the strongest error (refused >
+/// older > unreachable).
+#[derive(Default)]
+struct Verdict {
+    stale: Option<Fetched>,
+    refused: Option<FeedError>,
+    older: bool,
+}
+
+impl Verdict {
+    /// Takes `answer` in; a fresh feed is handed back at once.
+    fn add(&mut self, answer: Answer) -> Option<Fetched> {
+        match answer {
+            Answer::Fresh(fetched) => return Some(fetched),
+            Answer::Stale(fetched) => {
+                if self
+                    .stale
+                    .as_ref()
+                    .is_none_or(|s| s.feed.seq < fetched.feed.seq)
+                {
+                    self.stale = Some(fetched);
+                }
+            }
+            Answer::Older => self.older = true,
+            Answer::Refused(err) => {
+                self.refused.get_or_insert(err);
+            }
+            Answer::Unreachable => {}
+        }
+        None
+    }
+
+    fn finish(self) -> Result<Fetched, FetchError> {
+        match (self.stale, self.refused) {
+            (Some(stale), _) => Ok(stale),
+            (None, Some(err)) => Err(FetchError::Refused(err)),
+            (None, None) if self.older => Err(FetchError::Older),
+            (None, None) => Err(FetchError::Unreachable),
+        }
+    }
+}
+
+/// One mirror through `ways` in order (the session first). A refused signature tries the next
+/// way; any verified feed ends the mirror, which serves the same file on every way.
+async fn mirror(base: &str, ways: &[Way], keys: &[PublicKey], max_seq: u64) -> Answer {
+    let mut answer = Answer::Unreachable;
+    for way in ways {
+        let Some((bytes, sig)) = get_pair(way, base).await else {
+            continue;
+        };
+        let feed = match verify(&bytes, &sig, keys) {
+            Ok(feed) => feed,
+            Err(err) => {
+                tracing::warn!(%err, via = ?way.via, mirror = host(base), "feed refused");
+                // A different way may avoid whoever altered it.
+                answer = Answer::Refused(err);
+                continue;
+            }
+        };
+        let fresh = freshness(&feed, max_seq, Timestamp::now());
+        let fetched = Fetched {
+            feed,
+            bytes,
+            sig,
+            source: Source {
+                host: host(base),
+                via: way.via,
+            },
+            stale: fresh == Freshness::Stale,
+        };
+        return match fresh {
+            Freshness::Fresh => Answer::Fresh(fetched),
+            Freshness::Older => Answer::Older,
+            Freshness::Stale => Answer::Stale(fetched),
+        };
+    }
+    answer
+}
+
+/// `update.json` and its signature from `base`, fetched together (one round trip less), or
+/// `None` on any network or HTTP failure.
 async fn get_pair(way: &Way, base: &str) -> Option<(Vec<u8>, String)> {
     let client = feed_client(way).ok()?;
-    let bytes = get(&client, &format!("{base}{FEED_FILE}"), FEED_CAP).await?;
-    let sig = get(&client, &format!("{base}{SIG_FILE}"), SIG_CAP).await?;
-    Some((bytes, String::from_utf8(sig).ok()?))
+    let (feed, sig) = (format!("{base}{FEED_FILE}"), format!("{base}{SIG_FILE}"));
+    let (bytes, sig) = tokio::join!(get(&client, &feed, FEED_CAP), get(&client, &sig, SIG_CAP));
+    Some((bytes?, String::from_utf8(sig?).ok()?))
 }
 
 async fn get(client: &reqwest::Client, url: &str, cap: usize) -> Option<Vec<u8>> {

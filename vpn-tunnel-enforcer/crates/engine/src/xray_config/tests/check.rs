@@ -11,7 +11,7 @@ use crate::test_support::{xray_check, xray_exe};
 use crate::xray_config::{ProxyGraph, build_config, proxy_graph};
 
 /// Builds the full slot config of `p` and asserts the bundled Xray accepts it.
-fn assert_runs(p: &Profile, label: &str) {
+pub(super) fn assert_runs(p: &Profile, label: &str) {
     let graph = proxy_graph(p, ClientDevice::Pc).unwrap_or_else(|e| panic!("{label}: {e}"));
     let config = build_config(&graph, &endpoint(20002));
     if let Err(out) = xray_check(&config) {

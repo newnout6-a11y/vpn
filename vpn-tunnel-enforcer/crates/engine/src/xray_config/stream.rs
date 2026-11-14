@@ -26,15 +26,18 @@ const FILE_KEYS: [&str; 5] = [
     "sessionTicketKeyFile",
     "masterKeyLog",
 ];
-/// XHTTP connection reuse when the provider sets none (ru-2026 R3, XTLS discussion #4113): a few
-/// long-lived connections instead of a handshake burst, which RU DPI answers with a freeze. Every
-/// field is explicit because setting one drops all of Xray's defaults, and those changed between
-/// releases (6 -> 3 connections in 26.7.28). `maxConcurrency` stays unset: it excludes
-/// `maxConnections`.
+/// XHTTP connection reuse when the provider sets none (ru-2026 R3, XTLS discussion #4113): two
+/// long-lived connections. Xray opens a new connection per request until `maxConnections` exist,
+/// and the TSPU freezes a server for 120 s after more than 3 TLS handshakes to one SNI within a
+/// minute (habr 1044396), so 2 leaves room for a check or a `downloadSettings` connection.
+/// `cMaxReuseTimes` 0 never retires a connection by use count (a busy page would otherwise add
+/// handshakes inside that minute). Every field is explicit because setting one drops all of
+/// Xray's defaults, which changed between releases (6 -> 3 connections in 26.7.28).
+/// `maxConcurrency` stays unset: it excludes `maxConnections`.
 fn default_xmux() -> Value {
     json!({
-        "maxConnections": "4-6",
-        "cMaxReuseTimes": "64-128",
+        "maxConnections": 2,
+        "cMaxReuseTimes": 0,
         "hMaxRequestTimes": "600-900",
         "hMaxReusableSecs": "1800-3000",
         "hKeepAlivePeriod": 0,

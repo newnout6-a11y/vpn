@@ -383,6 +383,84 @@ async fn refresh_promotes_or_keeps() {
     );
 }
 
+/// `fake` that counts its downloads in `n`.
+fn counted(
+    n: &std::sync::atomic::AtomicUsize,
+    broken: Option<&'static str>,
+    bad: Option<Vec<u8>>,
+) -> impl AsyncFn(&'static str) -> Option<(Vec<u8>, RouteKind)> {
+    let inner = fake(broken, bad);
+    async move |url: &'static str| {
+        n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        inner(url).await
+    }
+}
+
+/// ops4 / conn6: a refused file is not fetched again by every session start for an hour (the
+/// same fault comes back, so the caller's one-notice-per-streak rule holds); a forced refresh
+/// and a download failure still try at once. Lab before: 4 downloads + checks per start.
+#[tokio::test]
+async fn a_refused_file_is_not_fetched_again_within_the_hour() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    if singbox_exe().is_none() {
+        return;
+    }
+    let t = TempDir::new("rulesets-backoff");
+    let s = service(&t);
+    let cancel = CancellationToken::new();
+    let n = AtomicUsize::new(0);
+    let gov = "geosite-category-gov-ru.srs";
+    let html = || Some(b"<html>rate limited</html>".to_vec());
+    let refused = RefreshOutcome::Failed(RefreshFault::Invalid { file: gov.into() });
+    let first = s
+        .refresh_with(false, 24, &cancel, counted(&n, Some(gov), html()))
+        .await;
+    assert_eq!(first, refused);
+    let downloads = n.load(SeqCst);
+    assert!(downloads > 0);
+    for _ in 0..3 {
+        let again = s
+            .refresh_with(false, 24, &cancel, counted(&n, Some(gov), html()))
+            .await;
+        assert_eq!(again, refused, "the recorded fault, not Fresh");
+    }
+    assert_eq!(n.load(SeqCst), downloads, "no download within the hour");
+    s.store
+        .update(|d| d.last_check = d.last_check.map(|t| t - INVALID_BACKOFF_MS - 1))
+        .unwrap();
+    let later = s
+        .refresh_with(false, 24, &cancel, counted(&n, None, None))
+        .await;
+    assert!(matches!(later, RefreshOutcome::Updated { .. }), "{later:?}");
+    let forced = s
+        .refresh_with(true, 24, &cancel, counted(&n, Some(gov), html()))
+        .await;
+    assert_eq!(forced, refused);
+    let before = n.load(SeqCst);
+    let forced = s
+        .refresh_with(true, 24, &cancel, counted(&n, Some(gov), html()))
+        .await;
+    assert_eq!(forced, refused);
+    assert!(n.load(SeqCst) > before, "a forced refresh downloads");
+    let missing = s
+        .refresh_with(true, 24, &cancel, counted(&n, Some("geoip-ru.srs"), None))
+        .await;
+    assert!(matches!(
+        missing,
+        RefreshOutcome::Failed(RefreshFault::Download { .. })
+    ));
+    let before = n.load(SeqCst);
+    s.store.update(|d| d.last_ok = None).unwrap();
+    let retry = s
+        .refresh_with(false, 24, &cancel, counted(&n, None, None))
+        .await;
+    assert!(matches!(retry, RefreshOutcome::Updated { .. }), "{retry:?}");
+    assert!(
+        n.load(SeqCst) > before,
+        "a download failure is retried at once"
+    );
+}
+
 /// `json` compiled by the bundled engine (`sing-box rule-set compile`).
 async fn compiled(exe: &Path, t: &TempDir, json: &str) -> Vec<u8> {
     let (src, out) = (t.path().join("hostile.json"), t.path().join("hostile.srs"));

@@ -21,9 +21,12 @@ fn names(entries: &[(&str, &str)]) -> Names {
 }
 
 async fn singbox_config(profile: &Profile, names: &Names) -> Value {
-    let plan = prepare(profile, 17990, EngineChoice::default(), names)
-        .await
-        .unwrap();
+    // sing-box asked for: since T1a (owner, 14.11.2026) Auto runs plain TLS keys on Xray.
+    let singbox = EngineChoice {
+        pref: EnginePref::SingBox,
+        ..EngineChoice::default()
+    };
+    let plan = prepare(profile, 17990, singbox, names).await.unwrap();
     assert!(plan.xray.is_none());
     serde_json::from_slice(&plan.singbox).unwrap()
 }

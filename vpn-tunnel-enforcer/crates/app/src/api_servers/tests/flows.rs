@@ -75,6 +75,13 @@ async fn the_page_works_over_a_real_list() {
     // does), nothing streams and nothing is stored. The engine's own refusal is the reason: an
     // unelevated process cannot spawn the missing exe, an elevated one (CI's runner) refuses it
     // first at the release pin check (`vpnte_engine::pin`).
+    // sing-box asked for: since T1a these TLS keys run on Xray in Auto, whose probe resolves the
+    // fake names first and reports them per key instead of the engine's refusal.
+    for id in [&first, &second] {
+        api.set_engine(id, vpnte_base::types::EnginePref::SingBox)
+            .await
+            .unwrap();
+    }
     let (results, mut landed) = mpsc::unbounded_channel();
     let err = api.check_all_health(results).await.unwrap_err();
     let key = err.user_msg().key;
@@ -219,8 +226,9 @@ async fn per_server_engine_is_visible_and_never_impossible() {
         reason: vpnte_base::Msg::new(key.to_owned()),
     };
     assert_eq!(vless.engine, EnginePref::Auto);
-    let default = plan(Engine::SingBox, "engine.xray.reason.default");
-    assert_eq!(vless.engine_plan, Some(default));
+    // T1a (owner, 14.11.2026): a plain TLS key runs on Xray in Auto (Chrome 155 hello).
+    let tls_hello = plan(Engine::Xray, "engine.xray.reason.tlsHello");
+    assert_eq!(vless.engine_plan, Some(tls_hello));
     let protocol = plan(Engine::SingBox, "engine.xray.reason.protocol");
     assert_eq!(tuic.engine_plan, Some(protocol));
 

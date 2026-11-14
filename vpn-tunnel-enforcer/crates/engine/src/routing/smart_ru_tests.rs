@@ -145,11 +145,12 @@ fn ru_probe_hosts_match_no_pin() {
     }
 }
 
-/// Lists stay verbatim: sizes as in smartRoute.ts.
+/// Lists stay verbatim: sizes as in smartRoute.ts, plus the two RU services of the November
+/// 2026 study (T7).
 #[test]
 fn list_sizes_are_verbatim() {
     assert_eq!(RU_TLD_SUFFIXES.len(), 3);
-    assert_eq!(RU_COMMERCIAL_SERVICE_SUFFIXES.len(), 20);
+    assert_eq!(RU_COMMERCIAL_SERVICE_SUFFIXES.len(), 22);
     assert_eq!(MAPS_DOMAIN_SUFFIXES.len(), 4);
     assert_eq!(GOOGLE_AND_GEMINI_PINNED_SUFFIXES.len(), 15);
     assert_eq!(KIMI_MOONSHOT_DOMAIN_SUFFIXES.len(), 6);
@@ -181,6 +182,9 @@ fn route_of_follows_the_lists_in_rule_order() {
         ("maps.yandex.ru", Some(SmartRoute::Vpn)),
         ("example.com", None),
         ("my2ip.ru", Some(SmartRoute::Direct)),
+        ("cdn1.ozonusercontent.com", Some(SmartRoute::Direct)),
+        ("bitrix.info", Some(SmartRoute::Direct)),
+        ("ozonusercontent.com.example", None),
     ];
     for (host, want) in cases {
         assert_eq!(ON.route_of(host, None), want, "{host}");

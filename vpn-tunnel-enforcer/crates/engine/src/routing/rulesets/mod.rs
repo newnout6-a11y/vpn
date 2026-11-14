@@ -43,6 +43,12 @@ pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
 const CHECKS: u32 = 1;
 const GEN_PREFIX: &str = "gen-";
 const STAGING: &str = "staging";
+/// After a refresh refused a file's content, an unforced refresh waits this long (ops4 / conn6).
+/// The fetch is HTTPS-only and a non-2xx answer moves to the next route, so `Invalid` means the
+/// upstream file itself is bad: in the lab the same file was fetched and refused again after
+/// every session start (5 times in 7 minutes). A download failure is still retried at once
+/// through a new session (psmart-a1/b6).
+const INVALID_BACKOFF_MS: i64 = 3_600_000;
 
 /// `cache/rulesets.json`: which managed generation is active and how the last refresh went.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -344,11 +350,20 @@ impl RuleSetService {
     }
 }
 
+/// The content fault of the last refresh while it is younger than [`INVALID_BACKOFF_MS`]: the
+/// caller sees the same failure (one notice per failure streak) without a new download.
+fn backing_off(doc: &RuleSetsDoc, now: UnixMs) -> Option<RefreshFault> {
+    let fault = doc.last_error.as_ref()?;
+    let recent = doc.last_check.is_some_and(|t| now - t < INVALID_BACKOFF_MS);
+    (recent && matches!(fault, RefreshFault::Invalid { .. })).then(|| fault.clone())
+}
+
 /// Refresh: download → validate → promote.
 impl RuleSetService {
     /// Downloads, validates and promotes every file (see the module docs). Without `force`
     /// nothing happens while the current generation is younger than the interval and
-    /// complete. On any failure the active files stay and the fault is recorded.
+    /// complete, nor for an hour after a refused file (that fault is returned again). On any
+    /// failure the active files stay and the fault is recorded.
     pub async fn refresh(
         &self,
         cfg: &RefreshSettings,
@@ -385,6 +400,13 @@ impl RuleSetService {
                 .is_some_and(|g| complete(&self.root.join(g)));
         if fresh && !force {
             return RefreshOutcome::Fresh;
+        }
+        if !force && let Some(fault) = backing_off(&doc, now_ms()) {
+            tracing::debug!(
+                ?fault,
+                "smart-RU rule sets refused recently; refresh skipped"
+            );
+            return RefreshOutcome::Failed(fault);
         }
         let started = now_ms();
         let staging = self.root.join(STAGING);

@@ -139,27 +139,98 @@ fn plausibility_gate() {
 }
 
 /// Vector 24: while the tunnel runs a ping never uses an unbound socket; UDP-only protocols get
-/// no SYNs at all.
+/// no SYNs at all (no SOCKS rung, and the TCP half of `both` stays idle for them).
 #[test]
 fn ladder_plan() {
     assert_eq!(plan(true, false), [Step::DirectSocks, Step::Physical]);
     assert_eq!(plan(true, true), [Step::Physical]);
-    assert_eq!(
-        plan(false, false),
-        [Step::Physical, Step::UnboundTcp, Step::UnboundIcmp]
-    );
-    assert_eq!(plan(false, true), [Step::Physical, Step::UnboundIcmp]);
-    for running in [true, false] {
-        for udp in [true, false] {
-            let steps = plan(running, udp);
-            if running {
-                assert!(!steps.contains(&Step::UnboundTcp) && !steps.contains(&Step::UnboundIcmp));
-            }
-            if udp {
-                assert!(!steps.contains(&Step::DirectSocks) && !steps.contains(&Step::UnboundTcp));
-            }
-        }
+    assert_eq!(plan(false, false), [Step::Physical, Step::Unbound]);
+    assert_eq!(plan(false, true), [Step::Physical, Step::Unbound]);
+    for udp in [true, false] {
+        assert!(!plan(true, udp).contains(&Step::Unbound));
     }
+}
+
+/// A UDP-only target gets no SYN: a loopback listener sees no connection.
+#[tokio::test]
+async fn udp_only_targets_get_no_syn() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tcp, _) = both(None, addr, true).await;
+    assert_eq!(tcp, None);
+    let accepted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+    assert!(accepted.is_err(), "no connection for a UDP-only target");
+}
+
+async fn after<T>(ms: u64, value: T) -> T {
+    tokio::time::sleep(Duration::from_millis(ms)).await;
+    value
+}
+
+fn sample(ms: u32, path: PingPath) -> Option<PingSample> {
+    Some(PingSample { ms, path })
+}
+
+/// `elapsed` is `ms` of virtual time (the timer wheel rounds to whole milliseconds).
+fn assert_took(elapsed: Duration, ms: u64) {
+    let want = Duration::from_millis(ms);
+    assert!(
+        elapsed >= want && elapsed < want + Duration::from_millis(5),
+        "{elapsed:?}"
+    );
+}
+
+/// ops6 (virtual time): a dead server costs the physical probe's 1.8 s plus the 0.4 s head start,
+/// not the sum of the steps (physical 1.8 + unbound TCP 1.8 + unbound ICMP 1.5 = 5.1 s before); a
+/// physical answer keeps the unbound probe off and wins over an earlier unbound one; an empty
+/// physical step hands over at once.
+#[tokio::test(start_paused = true)]
+async fn the_unbound_probe_races_the_physical_one() {
+    let t = Instant::now();
+    assert_eq!(race(after(1800, None), || after(1800, None)).await, None);
+    assert_took(t.elapsed(), 2200);
+
+    let (tcp, icmp, late) = (
+        sample(40, PingPath::Tcp),
+        sample(90, PingPath::Icmp),
+        sample(20, PingPath::Tcp),
+    );
+    let started = std::cell::Cell::new(false);
+    let t = Instant::now();
+    let got = race(after(40, tcp), || {
+        started.set(true);
+        after(1, None)
+    })
+    .await;
+    assert_eq!((got, started.get()), (tcp, false));
+    assert_took(t.elapsed(), 40);
+
+    let t = Instant::now();
+    assert_eq!(race(after(1500, icmp), || after(10, late)).await, icmp);
+    assert_took(t.elapsed(), 1500);
+    let t = Instant::now();
+    assert_eq!(race(after(1800, None), || after(10, late)).await, late);
+    assert_took(t.elapsed(), 1800);
+    let t = Instant::now();
+    assert_eq!(race(after(0, None), || after(100, late)).await, late);
+    assert_took(t.elapsed(), 100);
+}
+
+/// ops6 (virtual time): the physical sources run at once; the first TCP answer wins without
+/// waiting for a silent source (one after another it took 1.5 s and gave the first source's
+/// ICMP), ICMP only when no source has TCP.
+#[tokio::test(start_paused = true)]
+async fn the_first_tcp_answer_of_any_source_wins() {
+    let t = Instant::now();
+    let got = pick([after(1500, (None, Some(30))), after(25, (Some(25), None))]).await;
+    assert_eq!(got, sample(25, PingPath::Tcp));
+    assert_took(t.elapsed(), 25);
+    let t = Instant::now();
+    let got = pick([after(1800, (None, None)), after(60, (None, Some(60)))]).await;
+    assert_eq!(got, sample(60, PingPath::Icmp));
+    assert_took(t.elapsed(), 1800);
+    let none: [std::future::Ready<(Option<u32>, Option<u32>)>; 0] = [];
+    assert_eq!(pick(none).await, None);
 }
 
 /// UDP transports are ICMP-only targets; IPv6 servers stay unbracketed.

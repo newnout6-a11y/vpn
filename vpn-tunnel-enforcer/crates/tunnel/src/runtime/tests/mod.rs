@@ -679,7 +679,11 @@ pub fn local_req() -> StartRequest {
 /// Obvious fakes: documentation addresses and a zero UUID.
 pub const XRAY_KEY: &str = "vless://00000000-0000-4000-8000-000000000001@203.0.113.10:443?security=tls&sni=example.com&type=tcp#Fake%20A";
 pub const XRAY_KEY_2: &str = "vless://00000000-0000-4000-8000-000000000002@203.0.113.11:443?security=tls&sni=example.com&type=tcp#Fake%20B";
-pub const NATIVE_KEY: &str =
+/// A key sing-box runs natively in Auto (Shadowsocks: since T1a, owner decision 14.11.2026, plain
+/// TLS keys run on Xray in Auto).
+pub const NATIVE_KEY: &str = "ss://MjAyMi1ibGFrZTMtYWVzLTEyOC1nY206QVFJREJBVUdCd2dKQ2dzTURRNFBFQT09@203.0.113.12:8388#Fake%20C";
+/// A TLS key (Trojan): in Auto it runs on Xray since T1a; asked for sing-box it runs there.
+pub const TLS_KEY: &str =
     "trojan://fake-password@203.0.113.12:443?security=tls&sni=example.com#Fake%20C";
 /// A native key that dials a name (WebSocket over TLS): its address is pinned at the start.
 pub const NATIVE_BY_NAME_KEY: &str = "vless://00000000-0000-4000-8000-000000000004@cdn.example:443?type=ws&path=%2Fws&security=tls#Fake%20D";

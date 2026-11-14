@@ -13,7 +13,7 @@ use super::wire::{
 
 /// The engine reasons the app can show again; a reason of another shape (sing-box only, with
 /// its cause) reads as none: it only labels the run.
-const REASONS: [SelectReason; 7] = [
+const REASONS: [SelectReason; 8] = [
     SelectReason::Default,
     SelectReason::Protocol,
     SelectReason::Preference,
@@ -21,6 +21,7 @@ const REASONS: [SelectReason; 7] = [
     SelectReason::XrayTransport,
     SelectReason::NativeXray,
     SelectReason::CertPin,
+    SelectReason::TlsHello,
 ];
 
 impl From<EngineRunWire> for EngineRun {

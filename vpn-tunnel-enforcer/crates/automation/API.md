@@ -333,7 +333,9 @@ pub async fn read() -> Option<NetworkSnapshot>;       // Win32 on the blocking p
   start can run: a proxy capture never gets the TUN-only MTU mode).
 - Per tunnel start (sessions over a server, either capture, and local-proxy Hard; a local proxy
   behind the system proxy is never verified): 20 s settle, then 2 of 3
-  probes; on failure TLS compatibility → MTU 1280 (TUN only; ≤ 2 mode restarts) → up to 2 siblings; what
+  probes; on failure TLS compatibility (TLS without REALITY whose tricks are not fixed, either engine)
+  → MTU 1280 (TUN over a UDP relay or an unknown server: TCP keys never change with the TUN MTU, RU study
+  T11; ≤ 2 mode restarts) → up to 2 siblings; what
   worked is learned per (network, profile) for 30 days. A terminal failure is status `Failed` plus
   one `ConnectionError` Warn notice; the tunnel stays up unless a provisional sibling failed (then
   `abandon`). A `Started` the task did not ask for (user, switch, crash restart) supersedes the run.

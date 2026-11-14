@@ -100,8 +100,11 @@ pub async fn reliable_socks_latency(proxy: &Loopback, host: &str, port: u16, lim
 SOCKS latency = socket creation to the full CONNECT reply through a loopback SOCKS5 endpoint,
 `max(1, round(ms))`; `reliable_*` = the median of parallel samples.
 Ladder (DPI-safe): TUN up → direct-out SOCKS (TCP protocols), then physical-source TCP + ICMP, never
-an unbound socket; TUN down → physical sources, then unbound TCP, then unbound ICMP. Results are
-memory-only: the app records them (`Servers::record_ping`).
+an unbound socket; TUN down → physical sources, joined by unbound TCP + ICMP once the physical probe
+ended empty or after a 400 ms head start (a physical answer wins). Every physical source of the
+target's family is probed at once; the first TCP answer wins, ICMP only when no source has TCP (ops6:
+a dead server ~2.2 s instead of ~5.1 s). Results are memory-only: the app records them
+(`Servers::record_ping`).
 
 ## geo (`vpnte_probes::geo`)
 

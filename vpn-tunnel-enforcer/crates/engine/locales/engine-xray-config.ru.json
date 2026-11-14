@@ -16,6 +16,7 @@
         "xrayTransport": "транспорт Xray",
         "nativeXray": "конфигурация Xray от провайдера",
         "certPin": "закреплённый сертификат",
+        "tlsHello": "актуальный отпечаток TLS",
         "singBoxOnly": "функция есть только в sing-box"
       },
       "singBoxOnly": {

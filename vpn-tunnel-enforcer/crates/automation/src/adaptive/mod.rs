@@ -1,7 +1,7 @@
 //! Adaptive bypass: after every tunnel start, prove that the tunnel really reaches the internet
 //! (20 s settle, then 2 of 3 HTTPS probes) and, when it does not, escalate baseline → TLS
-//! compatibility → TUN MTU 1280 → up to two sibling servers; remember per (network, profile) what
-//! worked for 30 days.
+//! compatibility (TCP TLS keys) → TUN MTU 1280 (UDP relays) → up to two sibling servers;
+//! remember per (network, profile) what worked for 30 days.
 //!
 //! The engine knobs themselves live where the configs are built: TUN MTU in
 //! `vpnte_engine::singbox_config::select_mtu`; TLS compatibility is the default TLS tricks
@@ -47,8 +47,9 @@ pub struct ProfileView {
     pub client_device: Option<ClientDevice>,
     /// The uTLS fingerprint the profile names, if any.
     pub client_fingerprint: Option<String>,
-    /// The engine that runs this profile's upstream. On Xray TLS compatibility brings the TLS
-    /// tricks only (no uTLS rotation), and this bypass does not escalate there (A2).
+    /// The engine that runs this profile's upstream. No rule reads it since A2 was lifted (TLS
+    /// compatibility brings the same tricks on both: the tunnel resolves them into the key Xray
+    /// runs); drop it together with the app's `svc_auto::host::view_of`, which fills it.
     pub engine: Engine,
     /// TLS compatibility changes what the key runs: `false` when its TLS tricks are fixed (the
     /// key's own value or the user's choice wins over the app default), so that step would be a
@@ -68,10 +69,10 @@ pub struct Sibling {
 /// Which compatibility knobs can help the running session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capabilities {
-    /// TLS compatibility (TLS tricks + uTLS rotation) can change the handshake (sing-box upstream,
-    /// TLS without Reality).
+    /// TLS compatibility (TLS tricks) can change the handshake: TLS without Reality whose tricks
+    /// are not fixed by the key or the user.
     pub tls: bool,
-    /// A smaller TUN MTU can be tried (every Direct session).
+    /// A smaller TUN MTU can be tried: a Direct session over a UDP relay, or a server unknown here.
     pub mtu: bool,
     /// The upstream belongs to an external local proxy: nothing to adapt, nothing to probe.
     pub external: bool,
@@ -90,8 +91,11 @@ impl Capabilities {
     }
 }
 
-/// Capabilities of a session (AB:156-179 with fixes A2 and A7). Only a session over the server
-/// list has knobs; the MTU mode needs the TUN (a system-proxy session has no adapter to shrink).
+/// Capabilities of a session (AB:156-179 with fix A7). Only a session over the server list has
+/// knobs; the MTU mode needs the TUN (a system-proxy session has no adapter to shrink) and a UDP
+/// relay (RU study T11): sing-box ends TCP at the TUN and dials its own sockets, so the TUN MTU
+/// never changes a TCP key's packets or its ClientHello; there the step only cost a restart and
+/// ~50 s before the sibling, and a lucky retry was remembered as MTU 1280 for 30 days.
 pub fn capabilities(kind: SessionKind, profile: Option<&ProfileView>) -> Capabilities {
     if !kind.server() {
         return Capabilities {
@@ -109,18 +113,11 @@ pub fn capabilities(kind: SessionKind, profile: Option<&ProfileView>) -> Capabil
     let reality = tls
         .and_then(|t| t.get("reality"))
         .is_some_and(|r| r.is_object() && r.get("enabled") != Some(&Value::Bool(false)));
-    let xray = profile.is_some_and(|p| p.engine == Engine::Xray);
     let fixed = profile.is_some_and(|p| !p.tls_compat_applies);
-    let reason = if tls_on && reality {
-        Some(Msg::new("automation.adaptive.reason.reality"))
-    } else if tls_on && xray {
-        Some(Msg::new("automation.adaptive.reason.xray"))
-    } else {
-        None
-    };
+    let reason = (tls_on && reality).then(|| Msg::new("automation.adaptive.reason.reality"));
     Capabilities {
-        tls: tls_on && !reality && !xray && !fixed,
-        mtu: kind.tun(),
+        tls: tls_on && !reality && !fixed,
+        mtu: kind.tun() && profile.is_none_or(|p| udp_outbound(&p.outbound)),
         external: false,
         reason,
     }

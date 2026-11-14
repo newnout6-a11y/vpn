@@ -76,11 +76,16 @@ fn tls_vless() -> Profile {
     }
 }
 
-/// AT-00-001: the plain profile runs on sing-box, a forced preference is honoured.
+/// AT-00-001: a plain TLS key runs on Xray in Auto (T1a), a profile Xray adds nothing to on
+/// sing-box, a forced preference is honoured.
 #[test]
 fn defaults_and_preferences() {
     assert_eq!(
         select_engine(&tls_vless(), AUTO),
+        xray(SelectReason::TlsHello)
+    );
+    assert_eq!(
+        select_engine(&profile(shadowsocks("aes-128-gcm")), AUTO),
         sing_box(SelectReason::Default)
     );
     assert_eq!(
@@ -196,6 +201,7 @@ fn reasons_and_server_override() {
         (SelectReason::XrayTransport, "xrayTransport"),
         (SelectReason::NativeXray, "nativeXray"),
         (SelectReason::CertPin, "certPin"),
+        (SelectReason::TlsHello, "tlsHello"),
         (SelectReason::SingBoxOnly(SingBoxOnly::Ech), "singBoxOnly"),
     ] {
         assert_eq!(reason.msg().key, format!("engine.xray.reason.{key}"));
@@ -410,7 +416,7 @@ fn xray_only_transports() {
     };
     assert_eq!(
         select_engine(&plain_grpc, AUTO),
-        sing_box(SelectReason::Default)
+        xray(SelectReason::TlsHello)
     );
 }
 
@@ -681,6 +687,7 @@ fn every_rejection_has_text() {
         SelectReason::XrayTransport,
         SelectReason::NativeXray,
         SelectReason::CertPin,
+        SelectReason::TlsHello,
         SelectReason::SingBoxOnly(SingBoxOnly::Ech),
     ];
     let keys = rejects

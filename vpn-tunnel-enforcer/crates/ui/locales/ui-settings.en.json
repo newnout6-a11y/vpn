@@ -59,7 +59,7 @@
         "bypassPlaceholder": "example.com\n*.example.com\n192.168.1.1",
         "bypassAuto": "Add sites that go direct anyway",
         "engine": "Connection engine (Proxy Core)",
-        "engineHint": "«Auto» picks Xray for REALITY, Xray transports, provider Xray configs and pinned certificates, and sing-box for the rest; the engine is shown next to the server. «xray-core only» refuses protocols Xray lacks (TUIC, NaiveProxy, AnyTLS, ShadowTLS) instead of switching engines silently. A single server's engine is set in its «…» menu.",
+        "engineHint": "«Auto» picks Xray for REALITY and TLS keys (Xray has the current TLS fingerprint), Xray transports, provider Xray configs and pinned certificates, and sing-box for the rest and for keys with settings only sing-box has (mux, dial options); the engine is shown next to the server. «xray-core only» refuses protocols Xray lacks (TUIC, NaiveProxy, AnyTLS, ShadowTLS) instead of switching engines silently. A single server's engine is set in its «…» menu.",
         "engineAuto": "Auto (recommended)",
         "engineSingBox": "sing-box only",
         "engineXray": "xray-core only"

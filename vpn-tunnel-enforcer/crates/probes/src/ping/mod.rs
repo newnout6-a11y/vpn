@@ -9,7 +9,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use futures_util::future::join_all;
-use futures_util::stream::{self, Stream, StreamExt};
+use futures_util::stream::{self, FuturesUnordered, Stream, StreamExt};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpSocket;
@@ -39,6 +39,10 @@ pub const RESOLVE_TIMEOUT: Duration = Duration::from_millis(2500);
 pub const PING_ALL_WINDOW: usize = 6;
 /// A non-empty physical source list is reused this long; an empty one is re-read every time.
 const SOURCES_TTL: Duration = Duration::from_secs(10);
+/// How long the unbound probe (tunnel down) waits for the physical one. Not at once: it doubles
+/// the SYNs to every server, alive ones too, across a whole ping-all, and the TSPU counts
+/// connection bursts; a server that answers a physical source within this time gets none.
+const UNBOUND_HEAD_START: Duration = Duration::from_millis(400);
 
 /// How probes reach the network right now (a snapshot from the tunnel runtime).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -151,33 +155,22 @@ pub(crate) fn icmp_rtt(reply: &EchoReply, dst: IpAddr) -> Option<u32> {
 pub(crate) enum Step {
     /// SOCKS CONNECT through `mixed-direct-in` (TCP protocols, tunnel running).
     DirectSocks,
-    /// TCP (unless UDP-only) and ICMP from each physical source address: these bypass our TUN
-    /// and other VPNs' TUNs that own the default route.
+    /// TCP (unless UDP-only) and ICMP from every physical source address at once: these bypass
+    /// our TUN and other VPNs' TUNs that own the default route.
     Physical,
-    /// Plain TCP connect (tunnel down only).
-    UnboundTcp,
-    /// Plain ICMP echo (tunnel down only).
-    UnboundIcmp,
+    /// Plain TCP (unless UDP-only) and ICMP (tunnel down only), racing `Physical` after
+    /// [`UNBOUND_HEAD_START`]; a physical answer wins.
+    Unbound,
 }
 
 /// The ladder for a target: never an unbound socket while our TUN runs (it would measure the
 /// TUN), never a SYN to a UDP-only port.
 pub(crate) fn plan(tunnel_running: bool, udp_only: bool) -> Vec<Step> {
-    let tcp = !udp_only;
-    let mut steps = Vec::with_capacity(3);
-    if tunnel_running {
-        if tcp {
-            steps.push(Step::DirectSocks);
-        }
-        steps.push(Step::Physical);
-    } else {
-        steps.push(Step::Physical);
-        if tcp {
-            steps.push(Step::UnboundTcp);
-        }
-        steps.push(Step::UnboundIcmp);
+    match (tunnel_running, udp_only) {
+        (true, false) => vec![Step::DirectSocks, Step::Physical],
+        (true, true) => vec![Step::Physical],
+        (false, _) => vec![Step::Physical, Step::Unbound],
     }
-    steps
 }
 
 /// Pings `target` along the ladder (servers §3.7); `None` when no rung produced a plausible
@@ -198,42 +191,53 @@ pub async fn ping(
 }
 
 async fn ladder(target: &PingTarget, net: &NetPath) -> Option<PingSample> {
-    let loopback = target.loopback();
-    let mut dst: Option<Option<IpAddr>> = None;
-    for step in plan(net.tunnel_running(), target.udp_only) {
-        if step == Step::DirectSocks {
-            let sample = direct_socks(net.tun_direct.as_ref()?, target, loopback).await;
-            if sample.is_some() {
-                return sample;
-            }
-            continue;
-        }
-        // Resolved once, and only when a rung needs an address.
-        if dst.is_none() {
-            dst = Some(resolve_target(&target.host).await);
-        }
-        let ip = (*dst.as_ref()?)?;
-        let addr = SocketAddr::new(ip, target.port);
-        let sample = match step {
-            Step::Physical => physical(addr, target.udp_only).await,
-            Step::UnboundTcp => tcp_median(None, addr)
-                .await
-                .filter(|&ms| plausible(ms, ip.is_loopback()))
-                .map(|ms| PingSample {
-                    ms,
-                    path: PingPath::Tcp,
-                }),
-            Step::UnboundIcmp => echo(None, ip).await.map(|ms| PingSample {
-                ms,
-                path: PingPath::Icmp,
-            }),
-            Step::DirectSocks => None,
-        };
-        if sample.is_some() {
-            return sample;
-        }
+    let steps = plan(net.tunnel_running(), target.udp_only);
+    if let Some(direct) = net.tun_direct.as_ref()
+        && steps.contains(&Step::DirectSocks)
+        && let Some(sample) = direct_socks(direct, target, target.loopback()).await
+    {
+        return Some(sample);
     }
-    None
+    // Resolved only now: the SOCKS rung hands the name to sing-box.
+    let ip = resolve_target(&target.host).await?;
+    let addr = SocketAddr::new(ip, target.port);
+    let physical = physical(addr, target.udp_only);
+    if !steps.contains(&Step::Unbound) {
+        return physical.await;
+    }
+    race(physical, || unbound(addr, target.udp_only)).await
+}
+
+/// `physical`, joined by `unbound` once `physical` ended empty or after [`UNBOUND_HEAD_START`];
+/// a physical answer wins whenever both have one (ops6: the steps of a dead server no longer add
+/// up, ~5.1 s -> ~2.2 s).
+pub(crate) async fn race<P, U, F>(physical: P, unbound: U) -> Option<PingSample>
+where
+    P: Future<Output = Option<PingSample>>,
+    U: FnOnce() -> F,
+    F: Future<Output = Option<PingSample>>,
+{
+    tokio::pin!(physical);
+    let early = tokio::select! {
+        biased;
+        sample = &mut physical => Some(sample),
+        () = tokio::time::sleep(UNBOUND_HEAD_START) => None,
+    };
+    match early {
+        Some(Some(sample)) => return Some(sample),
+        Some(None) => return unbound().await,
+        None => {}
+    }
+    let late = unbound();
+    tokio::pin!(late);
+    tokio::select! {
+        biased;
+        sample = &mut physical => match sample {
+            Some(sample) => Some(sample),
+            None => late.await,
+        },
+        sample = &mut late => physical.await.or(sample),
+    }
 }
 
 /// [`SAMPLES`] SOCKS CONNECTs through `mixed-direct-in`. This relies on sing-box answering the
@@ -272,37 +276,57 @@ pub(crate) async fn resolve_target(host: &str) -> Option<IpAddr> {
     answers.first().copied()
 }
 
-/// From each physical source of the target's family in turn: TCP (unless UDP-only) and ICMP at
-/// the same time; a plausible TCP result wins over ICMP.
+/// From every physical source of the target's family at once (ops6: was one after another,
+/// 1.8 s per silent source): TCP (unless UDP-only) and ICMP.
 async fn physical(dst: SocketAddr, udp_only: bool) -> Option<PingSample> {
+    let sources = physical_sources().await;
+    let same_family = sources
+        .into_iter()
+        .filter(|src| src.is_ipv4() == dst.is_ipv4());
+    pick(same_family.map(|src| both(Some(src), dst, udp_only))).await
+}
+
+/// Plain TCP (unless UDP-only) and ICMP at once (tunnel down only).
+async fn unbound(dst: SocketAddr, udp_only: bool) -> Option<PingSample> {
+    pick([both(None, dst, udp_only)]).await
+}
+
+/// TCP (unless UDP-only) and ICMP from `src` (`None` = unbound) at the same time, each only when
+/// plausible.
+async fn both(src: Option<IpAddr>, dst: SocketAddr, udp_only: bool) -> (Option<u32>, Option<u32>) {
     let loopback = dst.ip().is_loopback();
-    for src in physical_sources().await {
-        if src.is_ipv4() != dst.is_ipv4() {
-            continue;
+    let tcp = async {
+        if udp_only {
+            return None;
         }
-        let tcp = async {
-            if udp_only {
-                return None;
-            }
-            tcp_median(Some(src), dst)
-                .await
-                .filter(|&ms| plausible(ms, loopback))
-        };
-        let (tcp, icmp) = tokio::join!(tcp, echo(Some(src), dst.ip()));
+        tcp_median(src, dst)
+            .await
+            .filter(|&ms| plausible(ms, loopback))
+    };
+    tokio::join!(tcp, echo(src, dst.ip()))
+}
+
+/// Runs `probes` (TCP, ICMP) at once: the first TCP answer wins at once, else the first ICMP one
+/// once every probe ended.
+pub(crate) async fn pick<F>(probes: impl IntoIterator<Item = F>) -> Option<PingSample>
+where
+    F: Future<Output = (Option<u32>, Option<u32>)>,
+{
+    let mut running: FuturesUnordered<F> = probes.into_iter().collect();
+    let mut icmp = None;
+    while let Some((tcp, echo)) = running.next().await {
         if let Some(ms) = tcp {
             return Some(PingSample {
                 ms,
                 path: PingPath::Tcp,
             });
         }
-        if let Some(ms) = icmp {
-            return Some(PingSample {
-                ms,
-                path: PingPath::Icmp,
-            });
-        }
+        icmp = icmp.or(echo);
     }
-    None
+    icmp.map(|ms| PingSample {
+        ms,
+        path: PingPath::Icmp,
+    })
 }
 
 /// [`SAMPLES`] parallel connects, reduced by [`median`].

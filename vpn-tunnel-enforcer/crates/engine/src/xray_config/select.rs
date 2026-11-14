@@ -41,6 +41,9 @@ pub enum SelectReason {
     /// A pinned certificate hash: Xray enforces it, sing-box only pins public keys (a different
     /// value) and would run the profile without the pin.
     CertPin,
+    /// A plain TLS key Xray runs with nothing lost: the bundled Xray's uTLS sends the current
+    /// Chrome hello, sing-box's still Chrome 133, which the TSPU rate-limits (owner, 14.11.2026).
+    TlsHello,
     /// The profile uses something only sing-box can do.
     SingBoxOnly(SingBoxOnly),
     /// AmneziaWG on the WP-12 lab engine mihomo (feature `lab`, lab record present).
@@ -87,6 +90,7 @@ impl SelectReason {
             SelectReason::XrayTransport => "engine.xray.reason.xrayTransport",
             SelectReason::NativeXray => "engine.xray.reason.nativeXray",
             SelectReason::CertPin => "engine.xray.reason.certPin",
+            SelectReason::TlsHello => "engine.xray.reason.tlsHello",
             SelectReason::SingBoxOnly(_) => "engine.xray.reason.singBoxOnly",
             #[cfg(feature = "lab")]
             SelectReason::Amneziawg => "engine.lab.reason.amneziawg",
@@ -248,6 +252,7 @@ pub fn select_engine(p: &Profile, pref: EnginePref) -> Decision {
         EnginePref::Auto if explicit_gun(p) => xray(SelectReason::XrayTransport),
         EnginePref::Auto if reality(p) => xray(SelectReason::Reality),
         EnginePref::Auto if cert_pin(p).is_some() => xray(SelectReason::CertPin),
+        EnginePref::Auto if plain_tls(p) => xray(SelectReason::TlsHello),
         EnginePref::Auto => sing_box(SelectReason::Default),
         EnginePref::Xray if explicit_gun(p) => xray(SelectReason::XrayTransport),
         EnginePref::Xray => xray(SelectReason::Preference),
@@ -333,6 +338,27 @@ fn xray_checks(tls: &Tls) -> bool {
             .as_ref()
             .and_then(Reality::mldsa65_key)
             .is_some()
+}
+
+/// VLESS / VMess / Trojan over TLS (not REALITY, not ECH) on RAW, WebSocket, HTTPUpgrade or gRPC
+/// that Xray runs with nothing lost or to warn about: no mux, default dial options, no pasted
+/// sing-box options, a fingerprint Xray keeps. sing-box 1.14.4 (utls 1.8.7) sends Chrome 133,
+/// whose connections the TSPU limits (RPRX, 2026-10-13); Xray 26.11.9 sends Chrome 155. ECH stays:
+/// Xray's hello with it is unmeasured.
+fn plain_tls(p: &Profile) -> bool {
+    let kind = matches!(
+        p.kind,
+        Kind::Vless { .. } | Kind::Vmess { .. } | Kind::Trojan { .. }
+    );
+    let transport = matches!(
+        p.transport,
+        None | Some(Transport::Ws { .. } | Transport::HttpUpgrade { .. } | Transport::Grpc { .. })
+    );
+    let tls = p
+        .tls
+        .as_ref()
+        .is_some_and(|t| t.reality.is_none() && t.ech.is_none());
+    kind && transport && tls && super::warnings(p, false).is_empty()
 }
 
 fn explicit_gun(p: &Profile) -> bool {

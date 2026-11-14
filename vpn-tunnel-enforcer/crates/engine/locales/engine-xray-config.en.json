@@ -16,6 +16,7 @@
         "xrayTransport": "Xray transport",
         "nativeXray": "provider's Xray config",
         "certPin": "pinned certificate",
+        "tlsHello": "current TLS fingerprint",
         "singBoxOnly": "sing-box-only feature"
       },
       "singBoxOnly": {

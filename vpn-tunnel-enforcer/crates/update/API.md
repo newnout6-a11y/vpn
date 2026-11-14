@@ -70,8 +70,11 @@ pub struct Fetched { feed, bytes, sig, source: Source { host, via }, stale: bool
 pub enum FetchError { Unreachable, Refused(FeedError), Older }
 pub fn freshness(&Feed, max_seq, now: jiff::Timestamp) -> Freshness;   // Fresh | Older | Stale
 ```
-Order: each mirror, each way (session first); a refused signature tries the other way; an older
-`seq` moves to the next mirror; a stale feed is returned only when nothing fresher answered.
+Order: each mirror, each way (session first), json and signature fetched together; the next mirror
+starts when the running ones ended without a fresh feed or after a 3 s head start (ops5: a frozen
+mirror costs ~3 s, not 20 s per way), and the first fresh feed wins; a refused signature tries the
+other way; an older `seq` moves to the next mirror; a stale feed is returned only when nothing
+fresher answered. Errors rank refused > older > unreachable.
 
 ## `download`
 ```rust

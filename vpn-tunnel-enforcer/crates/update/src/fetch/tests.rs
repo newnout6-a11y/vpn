@@ -116,3 +116,63 @@ async fn an_old_feed_is_stale() {
     bad.issued = "yesterday".into();
     assert_eq!(freshness(&bad, 0, Timestamp::now()), Freshness::Stale);
 }
+
+/// A mirror that accepts connections and never answers (a frozen path to GitHub).
+async fn frozen() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/a/", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = listener.accept().await {
+            held.push(sock);
+        }
+    });
+    (base, task)
+}
+
+/// ops5: a frozen first mirror no longer holds the check for `FEED_TIMEOUT` per way (20 s, 40 s
+/// with the session way): the next mirror starts after `HEAD_START` and its fresh feed wins;
+/// json and signature come in one go. Measured here: before >= 20 s, after ~3 s.
+#[tokio::test]
+async fn a_frozen_mirror_gives_way_after_the_head_start() {
+    let key = TestKey::new();
+    let server = serve(vec![files("b", &key, &sample_feed(7))]).await;
+    let (frozen, task) = frozen().await;
+    let good = format!("{}b/", server.base);
+    let started = std::time::Instant::now();
+    let got = fetch_feed(&[&frozen, &good], &[Way::direct()], &[key.public()], 0)
+        .await
+        .unwrap();
+    let took = started.elapsed();
+    assert_eq!((got.feed.seq, got.stale), (7, false));
+    assert!(took >= HEAD_START, "{took:?}");
+    assert!(took < HEAD_START + Duration::from_secs(4), "{took:?}");
+    assert_eq!(server.log.lock().len(), 2, "json and signature, once each");
+    task.abort();
+}
+
+/// Mirrors that end without a fresh feed hand over at once, and every error keeps its rank:
+/// a refused signature over an older feed over nothing.
+#[tokio::test]
+async fn ended_mirrors_hand_over_at_once() {
+    let (key, other) = (TestKey::new(), TestKey::new());
+    let server = serve(vec![
+        files("old", &key, &sample_feed(2)),
+        files("foreign", &other, &sample_feed(9)),
+    ])
+    .await;
+    let base = |dir: &str| format!("{}{dir}/", server.base);
+    let (missing, old, foreign) = (base("missing"), base("old"), base("foreign"));
+    let started = std::time::Instant::now();
+    let err = fetch_feed(
+        &[&missing, &old, &foreign],
+        &[Way::direct()],
+        &[key.public()],
+        5,
+    )
+    .await;
+    assert_eq!(err, Err(FetchError::Refused(FeedError::Signature)));
+    assert!(started.elapsed() < HEAD_START, "no head start waited");
+    let err = fetch_feed(&[&old, &missing], &[Way::direct()], &[key.public()], 5).await;
+    assert_eq!(err, Err(FetchError::Older));
+}

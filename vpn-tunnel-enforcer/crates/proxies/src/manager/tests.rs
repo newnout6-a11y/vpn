@@ -1086,7 +1086,12 @@ async fn slots_name_their_engine() {
         engine: EnginePref::Xray,
         ..sample(2)
     };
-    let r = rig(vec![sample(1), xray], slow_timing());
+    // sing-box asked for: since T1a (owner, 14.11.2026) Auto runs a plain TLS key on Xray.
+    let native = ProxyProfile {
+        engine: EnginePref::SingBox,
+        ..sample(1)
+    };
+    let r = rig(vec![native, xray], slow_timing());
     let native = r.manager.start(connect(1, "profile-1")).await.unwrap();
     assert_eq!(native.instance.engine, Some(EngineKind::SingBox));
     let carried = r.manager.start(connect(2, "profile-x")).await.unwrap();

@@ -51,7 +51,10 @@ pub const RULE_SETS: [(&str, &str, &str); 4] = [
 /// DNS-only: resolved by the ISP-visible resolver, routed by `geoip-ru` on the answer (a
 /// Cloudflare-fronted `.ru` site still goes through the tunnel).
 pub const RU_TLD_SUFFIXES: &[&str] = &[".ru", ".su", ".xn--p1ai"];
-/// DNS-only, like the TLD list: RU services that also serve from .com / .net CDNs.
+/// DNS-only, like the TLD list: RU services that also serve from .com / .net / .info names.
+/// `.ozonusercontent.com` (Ozon's images) and `.bitrix.info` (the Bitrix24 counter) answer with
+/// nodes abroad on a tunnel-side lookup; the ISP-side answer is Russian, so `geoip-ru` sends it
+/// direct (RU study T7, runetfreedom `ru-available-only-inside`).
 pub const RU_COMMERCIAL_SERVICE_SUFFIXES: &[&str] = &[
     ".vk.com",
     ".vk.me",
@@ -73,6 +76,8 @@ pub const RU_COMMERCIAL_SERVICE_SUFFIXES: &[&str] = &[
     ".rutube.ru",
     ".hh.ru",
     ".kinopoisk.ru",
+    ".ozonusercontent.com",
+    ".bitrix.info",
 ];
 /// Direct only when the user enables "maps directly", otherwise pinned to the tunnel.
 pub const MAPS_DOMAIN_SUFFIXES: &[&str] = &[

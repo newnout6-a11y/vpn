@@ -35,7 +35,7 @@ async fn stealth_tricks_reach_sing_box() {
     let w = World::new();
     let h = spawn(&w);
     h.start(
-        stealthy(NATIVE_KEY, EnginePref::SingBox),
+        stealthy(TLS_KEY, EnginePref::SingBox),
         CancellationToken::new(),
     )
     .await

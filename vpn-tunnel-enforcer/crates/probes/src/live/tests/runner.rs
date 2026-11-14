@@ -74,6 +74,14 @@ impl LiveEnv for FakeEnv {
     fn profile(&self, id: &str) -> Option<ProfileTarget> {
         match id {
             "p1" => Some(target(vless())),
+            // sing-box in Auto (no TLS): since T1a a plain TLS key runs on Xray.
+            "plain" => Some(ProfileTarget {
+                id: "plain".into(),
+                ..target(vpnte_profiles::model::Profile {
+                    tls: None,
+                    ..vless()
+                })
+            }),
             "h2" => Some(ProfileTarget {
                 id: "h2".into(),
                 ..target(hysteria2())
@@ -395,7 +403,7 @@ async fn profile_check_without_engine() {
     let root = Root::new();
     let svc = service(FakeDns::default(), Budget::default(), &root);
     let request = JobRequest::Single(CheckRequest {
-        target: CheckTarget::Profile("p1".into()),
+        target: CheckTarget::Profile("plain".into()),
         mode: CheckMode::Basic,
         throughput: false,
     });
@@ -407,7 +415,7 @@ async fn profile_check_without_engine() {
         check.reachability.timed.error.as_deref(),
         Some("no address resolved")
     );
-    assert_eq!(svc.history().list(Some("p1"), None).len(), 1);
+    assert_eq!(svc.history().list(Some("plain"), None).len(), 1);
     svc.shutdown().await;
 }
 

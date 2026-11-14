@@ -353,7 +353,7 @@ unreachable, badAnswer, notConfirmed}`.
 
 ```rust
 pub enum SelectReason { Default, Protocol, Preference, Reality, XrayTransport, NativeXray, CertPin,
-    SingBoxOnly(SingBoxOnly) }                                          // Serialize, kebab-case
+    TlsHello, SingBoxOnly(SingBoxOnly) }                                // Serialize, kebab-case
 impl SelectReason { pub fn msg(self) -> Msg; } // engine.xray.reason.*: short caption after the engine name
 pub enum SingBoxOnly { H2Transport, QuicTransport, InsecureWithoutPin, SpkiPin, Ech, ShadowsocksPlugin,
     ShadowsocksUdpOverTcp, ShadowsocksMethod, RealityTransport, Plaintext }
@@ -399,7 +399,7 @@ Static ECH configs go to `echConfigList`; ECH by DNS lookup, over QUIC or with R
 `SingBoxOnly::Ech`. TLS writes `Tls::cert_names()` as `verifyPeerCertByName` (the SNI stays
 `serverName`), REALITY writes `Reality::mldsa65_key()` as `mldsa65Verify`. uTLS: the provider's fingerprint is kept (with a warning when servers refuse
 it), otherwise the device default if it is chrome / firefox / safari, else chrome. XHTTP gets
-an explicit `extra.xmux` (4-6 connections) unless the provider set one; no typed outbound ever
+an explicit `extra.xmux` (2 connections, no reuse cap) unless the provider set one; no typed outbound ever
 carries `mux`, and mux.cool is removed from a provider graph's XHTTP outbounds.
 TLS tricks (item 18): `Profile::tls_tricks_for(false)` (the key's own value; nothing for REALITY,
 QUIC or a key without SNI, as on sing-box) goes out as
@@ -415,7 +415,11 @@ without it and `warnings` says so.
 (`verifyPeerCertByName`, REALITY `mldsa65Verify`: `XrayTransport`; forced sing-box ->
 `Reject::XrayTransport`), explicit gRPC gun,
 REALITY and (new) any non-REALITY TLS profile with a certificate pin (`CertPin`: sing-box
-cannot enforce a DER hash pin); sing-box otherwise. Forced Xray runs every Xray-capable kind and
+cannot enforce a DER hash pin), and (T1a, owner 14.11.2026) VLESS / VMess / Trojan over TLS (not
+REALITY, not ECH) on RAW / WebSocket / HTTPUpgrade / gRPC whenever `warnings(p, false)` is empty
+(`TlsHello`: Xray 26.11.9 sends Chrome 155, sing-box 1.14.4 Chrome 133, which the TSPU rate-limits;
+a key with mux, dial options, pasted sing-box keys, SNI off, an unknown fingerprint or WS early
+data in a custom header stays on sing-box); sing-box otherwise. Forced Xray runs every Xray-capable kind and
 refuses the rest (no engine is ever switched silently; owner decision 2026-11-11). Show the
 engine with `reason.msg()` wherever a run or a planned run is displayed.
 **Warnings:** call `warnings(&profile, tls_compat)` whenever Xray runs the profile and show them
@@ -798,6 +802,9 @@ for w in &routing.warnings { notify(w.msg()) }
   every <= 30 s and on exit `store.update(|d| d.add_hits(&tracker.take()))`.
 - Rule sets: auto refresh (start, settings change, hourly) only when
   `RefreshSettings::auto_refresh(smart_ru_enabled)`; "update now" = `refresh(cfg, true, ..)`.
+  For an hour after a refused file (`RefreshFault::Invalid`) an unforced `refresh` downloads nothing
+  and returns that fault again (ops4 / conn6: no download per session start; one notice per streak
+  holds); a `Download` fault is retried at once.
 
 ## Events and messages to handle
 

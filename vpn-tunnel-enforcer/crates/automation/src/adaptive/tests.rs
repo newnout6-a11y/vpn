@@ -136,10 +136,14 @@ fn tls_ws(id: &str) -> ProfileView {
     profile(id, o)
 }
 
+/// A UDP relay: QUIC takes no TLS tricks, so only the MTU step applies.
 fn hy2(id: &str) -> ProfileView {
     let o = json!({"type": "hysteria2", "server": "h.example.test", "server_port": 443,
         "password": "PASSWORD_PLACEHOLDER", "tls": {"enabled": true}});
-    profile(id, o)
+    ProfileView {
+        tls_compat_applies: false,
+        ..profile(id, o)
+    }
 }
 
 struct Harness {
@@ -254,7 +258,8 @@ impl Drop for Harness {
 
 // ---------- pure parts ----------
 
-/// `adaptiveBypass.test.ts` capability matrix plus A2 (Xray: no TLS knob) and A7 (`enabled: false`).
+/// `adaptiveBypass.test.ts` capability matrix with A7 (`enabled: false`) and T11 (the MTU step
+/// only for UDP relays); TLS compatibility also on Xray (the tricks reach it, A2 lifted).
 #[test]
 fn capability_matrix_and_chain() {
     use AdaptiveMode::*;
@@ -262,50 +267,55 @@ fn capability_matrix_and_chain() {
     assert!(local.external && !local.tls && !local.mtu);
     assert_eq!(next_mode(Baseline, &local), None);
 
-    let tls = capabilities(
-        SessionKind::Direct,
-        Some(&profile("a", json!({"tls": {"enabled": true}}))),
-    );
-    assert!(tls.tls && tls.mtu && !tls.external && tls.reason.is_none());
+    let tls = capabilities(SessionKind::Direct, Some(&tls_ws("a")));
+    assert!(tls.tls && !tls.mtu && !tls.external && tls.reason.is_none());
     assert_eq!(next_mode(Baseline, &tls), Some(TlsCompatibility));
-    assert_eq!(next_mode(TlsCompatibility, &tls), Some(MtuCompatibility));
-    assert_eq!(next_mode(MtuCompatibility, &tls), None);
+    assert_eq!(next_mode(TlsCompatibility, &tls), None);
 
+    let udp = capabilities(SessionKind::Direct, Some(&hy2("h")));
+    assert!(!udp.tls && udp.mtu);
+    assert_eq!(next_mode(Baseline, &udp), Some(MtuCompatibility));
+    assert_eq!(next_mode(MtuCompatibility, &udp), None);
+    let both = profile("b", json!({"type": "tuic", "tls": {"enabled": true}}));
+    let both = capabilities(SessionKind::Direct, Some(&both));
+    assert_eq!(next_mode(TlsCompatibility, &both), Some(MtuCompatibility));
+
+    // T11: a TCP key (REALITY here) has no MTU step any more: straight to the siblings.
     let real = capabilities(SessionKind::Direct, Some(&reality("r")));
-    assert!(!real.tls && real.mtu);
+    assert!(!real.tls && !real.mtu);
     assert_eq!(
         real.reason.as_ref().unwrap().key,
         "automation.adaptive.reason.reality"
     );
-    assert_eq!(next_mode(Baseline, &real), Some(MtuCompatibility));
+    assert_eq!(next_mode(Baseline, &real), None);
+    // A server unknown here keeps the step.
+    assert!(capabilities(SessionKind::Direct, None).mtu);
 
     let mut xray = tls_ws("x");
     xray.engine = Engine::Xray;
     let xray = capabilities(SessionKind::Direct, Some(&xray));
-    assert!(!xray.tls && xray.mtu);
-    assert_eq!(next_mode(Baseline, &xray), Some(MtuCompatibility));
+    assert!(xray.tls && !xray.mtu && xray.reason.is_none());
+    assert_eq!(next_mode(Baseline, &xray), Some(TlsCompatibility));
 
     let plain = profile("p", json!({"type": "vless", "tls": {"enabled": false}}));
     assert!(!capabilities(SessionKind::Direct, Some(&plain)).tls);
     assert!(!capabilities(SessionKind::Direct, None).tls);
 
     // twire-b2: TLS tricks fixed by the key or the user: the TLS step would restart into the
-    // same handshake, so the bypass goes to the MTU step at once.
+    // same handshake; a TCP key then has no step at all.
     let fixed = ProfileView {
         tls_compat_applies: false,
         ..tls_ws("f")
     };
     let caps = capabilities(SessionKind::Direct, Some(&fixed));
-    assert!(!caps.tls && caps.mtu);
-    assert_eq!(next_mode(Baseline, &caps), Some(MtuCompatibility));
+    assert!(!caps.tls && !caps.mtu);
+    assert_eq!(next_mode(Baseline, &caps), None);
 
     // NOADMIN §2: the system proxy over a server has the TLS knob, but no adapter to shrink.
-    let proxy = capabilities(
-        SessionKind::SoftDirect,
-        Some(&profile("a", json!({"tls": {"enabled": true}}))),
-    );
+    let proxy = capabilities(SessionKind::SoftDirect, Some(&tls_ws("a")));
     assert!(proxy.tls && !proxy.mtu && !proxy.external);
     assert_eq!(next_mode(TlsCompatibility, &proxy), None);
+    assert!(!capabilities(SessionKind::SoftDirect, Some(&hy2("h"))).mtu);
     assert!(capabilities(SessionKind::Soft, None).external);
 }
 
@@ -354,13 +364,13 @@ async fn baseline_that_works_is_connected() {
     assert_eq!(h.host.probes(), 3);
 }
 
-/// Learning: MTU learned on a Reality server; the next begin starts in MTU; a hotspot with the
+/// Learning: MTU learned on a UDP relay; the next begin starts in MTU; a hotspot with the
 /// same subnet (another gateway MAC) starts in baseline; back home → MTU again; an unknown
 /// identity → baseline and the store unchanged.
 #[tokio::test]
 async fn learning_round_trip() {
     let mut h = Harness::new().ready().await;
-    let server = reality("r1");
+    let server = hy2("h1");
     h.host.script(&[false, false, false, true, true, true]);
     assert_eq!(h.connect(&server).await, AdaptiveMode::Baseline);
     let status = h.done().await;
@@ -437,7 +447,7 @@ async fn stale_learned_mode_is_forgotten() {
     h.settings
         .update(|s| s.adaptive_bypass_server_fallback = false)
         .unwrap();
-    let server = reality("r1");
+    let server = hy2("h1");
     h.host.script(&[false, false, false, true, true, true]);
     h.connect(&server).await;
     h.done().await;
@@ -479,8 +489,8 @@ async fn outbound_fault_skips_the_chain() {
     assert!(h.coord.restarts().is_empty());
 }
 
-/// AT-10-004: the whole budget — baseline → TLS → MTU, then two siblings (another family first),
-/// each started in the mode the chain reached; none verifies → the provisional sibling is
+/// AT-10-004: the whole budget of a TCP key — baseline → TLS (no MTU step, T11), then two
+/// siblings (another family first), each started in the mode the chain reached; none verifies → the provisional sibling is
 /// abandoned once, the failure stays visible and is announced once.
 #[tokio::test]
 async fn full_budget_then_abandon() {
@@ -512,13 +522,12 @@ async fn full_budget_then_abandon() {
         h.coord.restarts(),
         vec![
             (TlsCompatibility, None),
-            (MtuCompatibility, None),
-            (MtuCompatibility, Some("h1".to_owned())),
-            (MtuCompatibility, Some("r1".to_owned())),
+            (TlsCompatibility, Some("h1".to_owned())),
+            (TlsCompatibility, Some("r1".to_owned())),
         ]
     );
-    assert_eq!(status.attempts, 4);
-    assert_eq!(h.host.probes(), 15);
+    assert_eq!(status.attempts, 3);
+    assert_eq!(h.host.probes(), 12);
     assert_eq!(h.host.abandoned.load(Ordering::SeqCst), 1);
     assert!(h.host.selected.lock().is_empty());
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -557,9 +566,8 @@ async fn sibling_fallback_follows_the_network_verdicts() {
         h.coord.restarts(),
         vec![
             (TlsCompatibility, None),
-            (MtuCompatibility, None),
-            (MtuCompatibility, Some("t2".to_owned())),
-            (MtuCompatibility, Some("h1".to_owned())),
+            (TlsCompatibility, Some("t2".to_owned())),
+            (TlsCompatibility, Some("h1".to_owned())),
         ]
     );
 }
@@ -587,9 +595,8 @@ async fn verified_sibling_is_committed() {
         profile: hy2("h1"),
         latency_ms: None,
     }];
-    // Reality: baseline fails, MTU fails, the sibling passes 2 of 3.
-    h.host
-        .script(&[false, false, false, false, false, false, true, false, true]);
+    // Reality: baseline fails, no MTU step for a TCP key (T11), the sibling passes 2 of 3.
+    h.host.script(&[false, false, false, true, false, true]);
     h.connect(&reality("r1")).await;
     let status = h.done().await;
     assert_eq!(status.phase, Phase::Connected);
@@ -614,7 +621,7 @@ async fn sibling_without_egress_proof_is_not_probed() {
     h.coord
         .restart_results
         .lock()
-        .extend([Ok(()), Err(OpError::Timeout)]);
+        .extend([Err(OpError::Timeout)]);
     h.coord.end_on_error.store(true, Ordering::SeqCst);
     h.connect(&server).await;
     let status = h.done().await;
@@ -623,7 +630,11 @@ async fn sibling_without_egress_proof_is_not_probed() {
     assert_eq!(reason.key, "automation.adaptive.reason.siblingStartFailed");
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(h.status.borrow().phase, Phase::Failed);
-    assert_eq!(h.host.probes(), 6, "baseline and MTU windows only");
+    assert_eq!(
+        h.host.probes(),
+        3,
+        "the baseline window only (no MTU step for a TCP key)"
+    );
     assert!(h.host.selected.lock().is_empty());
 }
 
@@ -666,9 +677,10 @@ async fn manual_switch_during_a_sibling_window() {
         profile: hy2("h1"),
         latency_ms: None,
     }];
-    h.host.script(&[false; 9]);
+    // Baseline and TLS fail; the sibling window waits for the script below.
+    h.host.script(&[false; 6]);
     h.connect(&tls_ws("t1")).await;
-    while h.coord.restarts().len() < 3 || h.status.borrow().phase != Phase::Verifying {
+    while h.coord.restarts().len() < 2 || h.status.borrow().phase != Phase::Verifying {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
     h.host.script(&[true; 3]);
@@ -730,7 +742,7 @@ async fn network_change_restarts_the_window_without_learning() {
     .ready()
     .await;
     h.host.script(&[false, false, false]);
-    h.connect(&reality("r1")).await;
+    h.connect(&hy2("h1")).await;
     while h.coord.restarts().is_empty() || h.status.borrow().phase != Phase::Verifying {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
@@ -749,7 +761,7 @@ async fn identity_change_during_the_window_is_not_learned() {
     let mut h = Harness::new().ready().await;
     *h.host.switch_identity.lock() = Some((2, Some(net("10.0.0.1"))));
     h.host.script(&[false, false, false, true, true, true]);
-    h.connect(&reality("r1")).await;
+    h.connect(&hy2("h1")).await;
     assert_eq!(h.done().await.phase, Phase::Connected);
     assert!(h.learned().is_empty());
 }
@@ -762,7 +774,7 @@ async fn stale_publication_after_a_newer_begin() {
     let gate = Arc::new(Notify::new());
     *h.host.gate.lock() = Some((2, gate.clone()));
     h.host.script(&[false, false, false, true, true, true]);
-    h.connect(&reality("r1")).await;
+    h.connect(&hy2("h1")).await;
     while h.host.identity_calls.load(Ordering::SeqCst) < 2 {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
@@ -784,7 +796,7 @@ async fn invalidation_during_a_pending_learn() {
     *h.host.gate.lock() = Some((2, gate.clone()));
     h.host
         .script(&[false, false, false, true, true, true, true, true, true]);
-    h.connect(&reality("r1")).await;
+    h.connect(&hy2("h1")).await;
     while h.host.identity_calls.load(Ordering::SeqCst) < 2 {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
@@ -844,7 +856,7 @@ async fn failed_and_cancelled_starts() {
 async fn overlapping_starts_keep_their_own_preparation() {
     for refused_first in [false, true] {
         let mut h = Harness::new().ready().await;
-        let (user, other) = (reality("u1"), reality("s1"));
+        let (user, other) = (hy2("u1"), hy2("s1"));
         h.add(&user);
         h.add(&other);
         h.host.script(&[false, false, false, true, true, true]);
@@ -885,7 +897,7 @@ async fn overlapping_starts_keep_their_own_preparation() {
 async fn the_stealth_seed_never_gives_a_proxy_capture_the_mtu_mode() {
     let h = Harness::new().ready().await;
     h.settings.update(|s| s.stealth_mode = true).unwrap();
-    let server = reality("r1");
+    let server = hy2("h1");
     let proxy = h
         .adaptive
         .begin(SessionKind::SoftDirect, Some(server.clone()))
@@ -893,6 +905,12 @@ async fn the_stealth_seed_never_gives_a_proxy_capture_the_mtu_mode() {
     assert_eq!(proxy.mode, AdaptiveMode::Baseline);
     let tun = h.adaptive.begin(SessionKind::Direct, Some(server)).await;
     assert_eq!(tun.mode, AdaptiveMode::MtuCompatibility);
+    // T11: a TCP key gets no MTU seed either.
+    let tcp = h
+        .adaptive
+        .begin(SessionKind::Direct, Some(reality("r1")))
+        .await;
+    assert_eq!(tcp.mode, AdaptiveMode::Baseline);
     let tls = h
         .adaptive
         .begin(SessionKind::SoftDirect, Some(tls_ws("t1")))

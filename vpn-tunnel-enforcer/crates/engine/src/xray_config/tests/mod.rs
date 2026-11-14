@@ -10,7 +10,9 @@ use crate::test_locales::text;
 mod check;
 mod config;
 mod endpoints;
+mod hello;
 mod outbounds;
+mod plain_tls;
 mod resolve;
 mod security;
 mod select;
@@ -160,7 +162,7 @@ fn ip(literal: &str) -> Host {
 
 /// The connection reuse every typed XHTTP outbound gets when the provider sets none (ru-2026 R3).
 fn default_xmux() -> serde_json::Value {
-    serde_json::json!({"maxConnections": "4-6", "cMaxReuseTimes": "64-128",
+    serde_json::json!({"maxConnections": 2, "cMaxReuseTimes": 0,
         "hMaxRequestTimes": "600-900", "hMaxReusableSecs": "1800-3000", "hKeepAlivePeriod": 0})
 }
 
