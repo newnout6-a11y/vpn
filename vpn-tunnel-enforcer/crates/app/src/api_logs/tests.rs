@@ -7,6 +7,7 @@ use vpnte_base::Msg;
 use vpnte_base::i18n::Lang;
 use vpnte_base::types::Owner;
 use vpnte_core::ops::Source;
+use vpnte_service::proto::EngineLog;
 use vpnte_tunnel::api::CaptureKind;
 use vpnte_tunnel::history::{Entry, NewEntry, Route, SessionMode};
 use vpnte_tunnel::outcome::{
@@ -95,17 +96,15 @@ fn translated_headlines_stay_messages() {
     assert_eq!(row.reason, ui::DisconnectReason::User);
 }
 
-/// Folders of a test: the user's logs folder and a temp stand-in for the service's.
-fn folders(backend: &Backend, dir: &TempDir) -> Folders {
-    let service = dir.0.join("service-logs");
-    std::fs::create_dir_all(&service).expect("service folder");
+/// Folders of a test: the user's logs folder.
+fn folders(backend: &Backend) -> Folders {
     Folders {
         user: backend.dirs.logs.clone(),
-        service: Some(service),
     }
 }
 
-/// The helper service's lines as a fake pipe gives them.
+/// The helper service's lines as a fake pipe gives them (its engine logs: `engine one` for
+/// whichever log is asked).
 struct FakeService(std::sync::Mutex<Option<ServiceAnswer>>);
 
 #[async_trait::async_trait(?Send)]
@@ -118,11 +117,22 @@ impl ServiceLogs for FakeService {
             .take()
             .unwrap_or(ServiceAnswer::NotInstalled))
     }
+
+    async fn engine(&self, log: EngineLog) -> vpnte_base::AppResult<ServiceAnswer> {
+        use vpnte_service::proto::{ServiceLogLine, ServiceLogWire};
+        Ok(ServiceAnswer::Lines(ServiceLogWire {
+            lines: vec![ServiceLogLine {
+                offset: 0,
+                text: format!("{} one", log.stem()),
+            }],
+            truncated: false,
+        }))
+    }
 }
 
-fn start(backend: &Arc<Backend>, dir: &TempDir, answer: ServiceAnswer) -> LogsService {
+fn start(backend: &Arc<Backend>, answer: ServiceAnswer) -> LogsService {
     let fake = Arc::new(FakeService(std::sync::Mutex::new(Some(answer))));
-    LogsService::start_with(backend.clone(), folders(backend, dir), fake)
+    LogsService::start_with(backend.clone(), folders(backend), fake)
 }
 
 async fn wait(
@@ -148,7 +158,7 @@ fn count<T>(load: &Load<std::sync::Arc<[T]>>) -> usize {
 async fn each_clear_empties_its_own_part() {
     let dir = TempDir::new("logs");
     let backend = backend(&dir, FakeTunnel::new(false));
-    let api = start(&backend, &dir, ServiceAnswer::NotInstalled);
+    let api = start(&backend, ServiceAnswer::NotInstalled);
     let outcome = SessionOutcome::new(OutcomeKind::UserStop, Evidence::default());
     backend.history.add(new_entry("Lab", outcome)).expect("row");
     let mut rx = api.snapshot();
@@ -171,16 +181,15 @@ async fn each_clear_empties_its_own_part() {
 }
 
 /// p-logs: an engine log is the current session's wherever it runs: Proxy mode reads the
-/// user's folder, a Tunnel session through the service the service's folder; each says which.
+/// user's folder, a Tunnel session through the service its pipe (p-owner-logs O-4: the service's
+/// folder is SYSTEM and Administrators only); each says which.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn engine_logs_follow_the_session() {
     let dir = TempDir::new("logs-tail");
     let tunnel = FakeTunnel::new(false);
     let backend = backend(&dir, tunnel.clone());
-    let api = start(&backend, &dir, ServiceAnswer::NotInstalled);
-    let service = folders(&backend, &dir).service.expect("folder");
+    let api = start(&backend, ServiceAnswer::NotInstalled);
     std::fs::write(backend.dirs.logs.join("sing-box.log"), "own one\nown two\n").expect("log");
-    std::fs::write(service.join("sing-box.log"), "service one\n").expect("log");
     let idle = api.read_log(LogSource::SingBox).await.expect("tail");
     let texts = |t: &ui::LogTail| t.lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>();
     assert_eq!(texts(&idle), ["own one", "own two"]);
@@ -204,20 +213,26 @@ async fn engine_logs_follow_the_session() {
     );
     let xray = api.read_log(LogSource::Xray).await.expect("tail");
     assert!(!xray.exists && xray.lines.is_empty());
-    // A Tunnel session through the service: its folder (a temp stand-in here) and its line.
-    let folders = folders(&backend, &dir);
-    let (at, note) = folders.engine(Some(CaptureKind::Tun), true);
-    assert_eq!(
-        (at.as_path(), note),
-        (service.as_path(), TailNote::ServiceSession)
-    );
-    let tail = sources::read_tail(&at, "sing-box", note).expect("tail");
-    assert_eq!(texts(&tail), ["service one"]);
-    let (here, note) = folders.engine(Some(CaptureKind::Tun), false);
-    assert_eq!(
-        (here, note),
-        (backend.dirs.logs.clone(), TailNote::TunnelSession)
-    );
+    // Xray's session log is slot A's (`xray.log` was never written).
+    std::fs::write(backend.dirs.logs.join("xray-a.log"), "slot a\n").expect("log");
+    let xray = api.read_log(LogSource::Xray).await.expect("tail");
+    assert_eq!(texts(&xray), ["slot a"]);
+    // A Tunnel session through the service: its lines come through the (fake) pipe, under the
+    // session's line (`read_log` takes this branch when `engine_place` says so, as above).
+    let fake = FakeService(std::sync::Mutex::new(None));
+    for (log, line) in [
+        (EngineLog::SingBox, "sing-box one"),
+        (EngineLog::XrayA, "xray-a one"),
+    ] {
+        let answer = fake.engine(log).await.expect("answer");
+        let tail = sources::engine_tail(answer, TailNote::ServiceSession);
+        assert_eq!(
+            (texts(&tail), tail.note),
+            (vec![line.to_owned()], TailNote::ServiceSession)
+        );
+    }
+    let old = sources::engine_tail(ServiceAnswer::Old, TailNote::ServiceSession);
+    assert_eq!(old.note, TailNote::OldService, "an older service says so");
     backend.shutdown.cancel();
 }
 
@@ -235,7 +250,7 @@ async fn the_service_source_shows_the_users_lines() {
         }],
         truncated: true,
     };
-    let api = start(&backend, &dir, ServiceAnswer::Lines(log));
+    let api = start(&backend, ServiceAnswer::Lines(log));
     let tail = api.read_log(LogSource::Service).await.expect("tail");
     assert!(tail.exists && tail.truncated);
     assert_eq!(

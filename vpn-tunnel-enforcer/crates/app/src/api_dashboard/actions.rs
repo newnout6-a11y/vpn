@@ -86,8 +86,10 @@ impl Hub {
             Ok(done) => done.warnings.as_slice(),
             Err(err) => err.warnings(),
         };
+        // Messages for the user (a notice or the answer), not faults of the app: info, so the
+        // diagnostics' app-log check does not count them (owner logs O-2 / O-3).
         for w in warnings {
-            tracing::warn!(key = %w.key, "connection call finished with a warning");
+            tracing::info!(key = %w.key, "connection call finished with a note");
         }
         let rest = unanswered(warnings, shows, res.is_ok());
         let mut local = self.local.lock();
@@ -254,10 +256,12 @@ impl Hub {
             }
             hub.publish_dashboard();
             if let Ok(report) = &res {
-                // The page shows only the verdict; the log keeps which checks need attention.
+                // The page shows only the verdict; the log keeps which checks need attention,
+                // tagged as a check's own finding: the health check's app-log item does not
+                // count it again (owner logs O-3).
                 for item in &report.items {
                     if matches!(item.status, CheckStatus::Warn | CheckStatus::Fail) {
-                        tracing::warn!(item = item.id, status = ?item.status, "leak check finding");
+                        tracing::warn!(item = item.id, status = ?item.status, event_code = "leak-check-finding", "leak check finding");
                     }
                 }
             }

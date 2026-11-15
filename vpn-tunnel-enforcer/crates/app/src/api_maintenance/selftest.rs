@@ -13,6 +13,7 @@ use vpnte_probes::leak::{
     AddrProbe, Reach, SelfTestResult, SelfTestVerdict, SystemEnv, report, run_self_test,
 };
 use vpnte_tunnel::api::{CaptureKind, TunStatus};
+use vpnte_tunnel::lifecycle::{ForeignVpn, SystemForeignVpn};
 use vpnte_ui::maintenance::{
     AdapterProbe, LeakTestView, LeakVerdict, ProbeReach, RouteTestView, RouteVerdict, TunnelPhase,
 };
@@ -60,12 +61,21 @@ pub(crate) async fn route(shared: &Shared, cancel: CancellationToken) -> AppResu
         tun_source: Some(IpAddr::V4(vpnte_winnet::adapters::TUN_V4.addr())),
         smart_ru: settings.smart_ru_split,
         disable_geo_lookup: settings.disable_geo_lookup,
+        other_vpn: other_vpn().await,
     };
     let result = diagnostics::routing_test(inputs, cancel).await?;
     Ok(RouteTestView {
         verdict: route_verdict(result.verdict),
         message: result.message,
     })
+}
+
+/// Another VPN's tunnel carries the default route now, so the routing test's direct path leaves
+/// through it (owner logs O-6). An adapter-table walk, off the runtime; unreadable = none.
+pub(crate) async fn other_vpn() -> bool {
+    tokio::task::spawn_blocking(|| SystemForeignVpn.full_tunnel().is_some())
+        .await
+        .unwrap_or(false)
 }
 
 /// The tunnel, when a session is up (the page asks only then; a session may end meanwhile).

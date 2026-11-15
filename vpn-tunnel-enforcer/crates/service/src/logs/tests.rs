@@ -136,3 +136,30 @@ fn lines_belong_to_the_session_user_first() {
     assert_eq!(owner_of(None, Some(BOB)), Owner::User(BOB.into()));
     assert_eq!(owner_of(None, None), Owner::Service);
 }
+
+/// p-owner-logs O-4: an engine log reaches only the user whose session the engines run or ran
+/// last, and only the current session's file (the previous one may be another user's).
+#[test]
+fn an_engine_log_reaches_only_its_sessions_user() {
+    let root = temp("engine");
+    let logs = root.join("logs");
+    std::fs::create_dir_all(&logs).expect("logs dir");
+    std::fs::write(logs.join("xray-a.log"), "ready\nfailed to dial\n").expect("current");
+    std::fs::write(logs.join("xray-a.1.log"), "someone else's\n").expect("previous");
+    let read = |user, session| engine_in(Some(&root), EngineLog::XrayA, user, session);
+    let own = read(ALICE, Some(ALICE)).expect("read");
+    let texts: Vec<&str> = own.lines.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(texts, ["ready", "failed to dial"]);
+    assert_eq!(
+        read(BOB, Some(ALICE)).expect("read"),
+        ServiceLogWire::default()
+    );
+    assert_eq!(read(BOB, None).expect("read"), ServiceLogWire::default());
+    let none = engine_in(None, EngineLog::XrayA, ALICE, Some(ALICE)).expect("read");
+    assert_eq!(
+        none,
+        ServiceLogWire::default(),
+        "nothing before the log's init"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

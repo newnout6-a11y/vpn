@@ -185,6 +185,11 @@ impl Actor {
             (None, StopCause::User) => {
                 self.notify(Level::Info, "disconnected", NoticeKind::VpnDisconnect, None);
             }
+            // Owner logs O-1: the process exit ends what this process runs (kill-on-close job,
+            // dynamic WFP session) and the helper service ends or keeps its own run by its
+            // rules; the shutdown report logs the truth and the quit's own answer carries a
+            // failed rollback. An error toast while the app closes only alarms.
+            (Some(_), StopCause::AppQuit) => {}
             (Some(e), _) => {
                 let body = Some(Msg::new(e.msg));
                 self.notify(Level::Error, "stopFailed", NoticeKind::VpnDisconnect, body);

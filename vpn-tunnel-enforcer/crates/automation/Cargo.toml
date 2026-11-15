@@ -26,7 +26,7 @@ uuid.workspace = true
 vpnte-base.workspace = true
 vpnte-core.workspace = true
 vpnte-winnet.workspace = true
-windows.workspace = true
+windows = { workspace = true, features = ["Win32_UI_Input_KeyboardAndMouse"] }
 zeroize.workspace = true
 
 [dev-dependencies]

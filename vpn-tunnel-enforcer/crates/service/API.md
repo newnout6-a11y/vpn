@@ -25,7 +25,7 @@ vpnte-service.workspace = true
 | `per_user` | what the per-user side runs: `request_install` (the one elevated step, asked of Windows with `runas`), `request_uninstall` (the same for `uninstall`: Settings > Apps), `is_current`, `forget_me`, `status` |
 | `paths` | service name, `%ProgramFiles%\VPN Tunnel Enforcer Service\`, `%ProgramData%\VPN Tunnel Enforcer\` with its private `service\` part (`DataFiles`), `secure_dir` |
 | `service` | the service body (`run`): logging, WFP start-up, runtime, host, sandbox, graceful stop, the re-checks of a held kill switch (`service::recheck`: wake / network change, leak self-test); `trusted_install` / `FolderFault` |
-| `logs` | the service log (p-logs): `init(dir)` (global subscriber, redacted app-log JSON lines in `service\service.log` + `service.1.log`, 1 MiB, each tagged `user` = the session's SID, else the controller's, else none; `"?"` when the host is busy), `attribute(owner)`, `owner_of`, `lines_for(dir, sid)` / `for_user(sid)` (service-wide lines and the caller's own, tag stripped, last `REPLY_LINES` = 2000) |
+| `logs` | the service log (p-logs): `init(dir)` (global subscriber, redacted app-log JSON lines in `service\service.log` + `service.1.log`, 1 MiB, each tagged `user` = the session's SID, else the controller's, else none; `"?"` when the host is busy), `attribute(owner)`, `owner_of`, `lines_for(dir, sid)` / `for_user(sid)` (service-wide lines and the caller's own, tag stripped, last `REPLY_LINES` = 2000), `engine_for(log, sid, session_sid)` / `engine_lines(dir, stem)` (p-owner-logs O-4) |
 | `watchdog` | `Engaged` (a capture that records whether a session's filters are held) and `run` (the WFP watchdog exactly while they are) |
 | `sandbox` | engines may not start programs: each engine process in a nested job with `ActiveProcessLimit = 1` |
 | `update` | its own updates through the signed feed (p-svc-update): `swap` (the exe swap, trial, rollback), `engines` (`ServiceEngines`: Tunnel mode's engine store), `checks`, `source` (`Mirrors`), `trial` (`Judged`: the engines' trial from the host's starts), `in_flight` (`InFlight`, `Counted`: the host's calls in flight), `Updates` / `UpdatesDeps` (`Take` only, no schedule), `UpdateDesk` / `OwnSession`, `accepted_seq`, `staged_release`, `RESTART_EXIT` |
@@ -129,7 +129,10 @@ pub enum Request { Hello(Hello), Start(Box<TunnelStart>), Stop(StopTunnel), Rest
     Inputs(Box<RoutingInputs>), Status, KillSwitch(Box<ProtectionSettings>), Cleanup, ForgetMe,
     Update(UpdateAsk) /* p-svc-update: a first frame like ForgetMe, or after Hello */,
     ServiceLog /* p-logs: a first frame like Update, or after Hello; no PROTOCOL bump (never on a
-                  negotiated connection from the app; an older service answers badRequest) */ }
+                  negotiated connection from the app; an older service answers badRequest) */,
+    EngineLog(EngineLog) /* p-owner-logs O-4: one engine log of the caller's own session, like
+                  ServiceLog (first frame or after Hello; an older service answers badRequest) */ }
+pub enum EngineLog { SingBox, XrayA, XrayB }   // kebab-case on the wire; stem() = sing-box / xray-a / xray-b
 pub enum UpdateAsk { State, Take { version: String } }
 pub struct Hello { pub protocol: u32, pub app_version: String }
 pub struct TunnelStart { pub upstream: Upstream, pub routing: RoutingInputs,
@@ -149,7 +152,7 @@ pub struct RoutingInputs { smart_ru, smart_ru_maps_direct, domain_rules: Vec<Dom
 pub enum Reply { Welcome { protocol, service_version }, Started(Option<StartReceiptWire>),
     Stopped(StopReceiptWire), Switched(Option<SwitchReceiptWire>), Status(Box<StatusReply>),
     Done { removing: bool }, Cleaned { filters, sublayer, provider }, Update(ServiceUpdateWire),
-    ServiceLog(ServiceLogWire) }
+    ServiceLog(ServiceLogWire), EngineLog(ServiceLogWire) }
 pub struct ServiceLogWire { pub lines: Vec<ServiceLogLine { offset: u64, text: String }>, pub truncated: bool }
 pub struct ServiceUpdateWire { pub version: String, pub phase: UpdatePhase /* Off | Idle | Working | Waiting
     | Restarting | Failed */, pub target: Option<String>, pub checked_at: Option<UnixMs> }
@@ -295,8 +298,12 @@ is dropped when it comes. A per-user uninstaller sends `ForgetMe` as its first f
   is writable by non-admins (`sddl::path_admin_only`: owner and every non-inherit-only allow ACE
   with write rights must be SYSTEM / Administrators / TrustedInstaller). A missing file is
   `service.folder.fileMissing(file)` instead (an antivirus quarantine, say: not tampering).
-- Data folder `%ProgramData%\VPN Tunnel Enforcer\` (`ADMIN_ONLY_DIR_SDDL`: users read; `logs\`
-  with the engine logs of TUN sessions, which the app reads directly, NOADMIN §4) and its
+- Data folder `%ProgramData%\VPN Tunnel Enforcer\` (`ADMIN_ONLY_DIR_SDDL`: users read), its
+  `logs\` with the engine logs of TUN sessions (p-owner-logs O-4: `PRIVATE_DIR_SDDL` since
+  15.11.2026, an older install's folder that users could read is repaired in place at install and
+  at every service start, its files with it; a user reads his own session's current
+  `<stem>.log` through `EngineLog`: `logs::engine_for`, only the SID whose session the engines
+  run or ran last, never `.1.log`) and its
   private part `service\` (`PRIVATE_DIR_SDDL`: SYSTEM / Administrators only, nothing inherited:
   `users.json`, `protection.json`, `session.json`, `service.log` rotated at 1 MiB into
   `service.1.log`), each re-created when it is missing or user-writable. The service log reaches

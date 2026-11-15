@@ -81,8 +81,10 @@ pub(super) fn xhttp_with_mux(outbound: &Value) -> bool {
 /// The complete Xray config for one instance listening on `ep` (valid by construction, so this
 /// cannot fail).
 ///
-/// Log: `info` (Xray reports dial and handshake failures only at Info), error log to stdout
-/// (`""`), access log off. Never `dns`, `api`, `stats`, provider inbounds or provider log.
+/// Log: `info` (Xray reports dial and handshake failures only at Info, and the fault
+/// classification reads them from the pipe; the log file leaves the routine per-connection lines
+/// out: `RotatingFile::engine`), error log to stdout (`""`), access log off. Never `dns`, `api`,
+/// `stats`, provider inbounds or provider log.
 pub fn build_config(graph: &ProxyGraph, ep: &SlotEndpoint) -> Value {
     let creds = ep.creds();
     let inbound = json!({

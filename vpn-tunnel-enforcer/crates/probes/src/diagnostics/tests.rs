@@ -103,7 +103,7 @@ fn rows_are_capped_with_a_tail() {
 fn routing_verdicts() {
     let v = |t, vpn: Option<&str>, direct: Option<&str>, smart, ru: Option<&str>| {
         let (verdict, msg, split, ru_direct) =
-            derive_routing_verdict(t, vpn.map(ip), direct.map(ip), smart, ru.map(ip));
+            derive_routing_verdict(t, vpn.map(ip), direct.map(ip), smart, ru.map(ip), false);
         (verdict, msg.key.into_owned(), split, ru_direct)
     };
     assert_eq!(
@@ -172,6 +172,7 @@ fn routing_verdicts() {
         Some(ip("5.5.5.5")),
         true,
         Some(ip("9.9.9.9")),
+        false,
     );
     assert_eq!(
         msg.args
@@ -180,6 +181,35 @@ fn routing_verdicts() {
             .collect::<Vec<_>>(),
         vec![("vpn", "9.9.9.9"), ("direct", "5.5.5.5"), ("ru", "9.9.9.9")]
     );
+}
+
+/// Owner logs O-6 (15.11): another default-route VPN carries the direct path (its own RU
+/// routing sends the Russian host out by a third address): Ok with a calm note, never Partial;
+/// the Russian host on our own exit stays a real Partial there too.
+#[test]
+fn another_vpn_makes_the_ru_comparison_no_evidence() {
+    let v = |ru: &str| {
+        let (verdict, msg, split, ru_direct) = derive_routing_verdict(
+            true,
+            Some(ip("9.9.9.9")),
+            Some(ip("5.5.5.5")),
+            true,
+            Some(ip(ru)),
+            true,
+        );
+        (verdict, msg.key.into_owned(), split, ru_direct)
+    };
+    assert_eq!(
+        v("7.7.7.7"),
+        (
+            RoutingVerdict::Ok,
+            "probes.routing.smartOtherVpn".into(),
+            true,
+            None
+        )
+    );
+    assert_eq!(v("9.9.9.9").0, RoutingVerdict::Partial, "through our exit");
+    assert_eq!(v("5.5.5.5").1, "probes.routing.smartOk");
 }
 
 /// Echo bodies: strict for egress, octet-checked first quad for the RU page (junk skipped).
@@ -240,6 +270,7 @@ fn inputs(smart_ru: bool, disable_geo_lookup: bool, direct: bool) -> RoutingInpu
         tun_source: None,
         smart_ru,
         disable_geo_lookup,
+        other_vpn: false,
     }
 }
 

@@ -40,10 +40,13 @@ struct Timing {
     empty_ttl: Duration,
 }
 
+/// An address keeps its country and its network owner for hours: owner logs O-7 (15.11), every
+/// connect, check and resume asked the providers again, and they rate-limit a VPN exit that many
+/// people share.
 const TIMING: Timing = Timing {
     deadline: Duration::from_secs(6),
     poll: Duration::from_millis(25),
-    found_ttl: Duration::from_secs(5 * 60),
+    found_ttl: Duration::from_secs(60 * 60),
     empty_ttl: Duration::from_secs(5),
 };
 /// Cache size (oldest entry evicted first).
@@ -200,17 +203,47 @@ enum Wave {
 }
 
 /// Answers by IP with the time they were stored, plus insertion order for eviction.
-#[derive(Default)]
-struct Cache {
-    map: HashMap<IpAddr, (Option<Iso2>, Instant)>,
+struct Cache<V> {
+    map: HashMap<IpAddr, (V, Instant)>,
     order: VecDeque<IpAddr>,
+}
+
+impl<V> Default for Cache<V> {
+    fn default() -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+}
+
+impl<V: Clone> Cache<V> {
+    /// The answer stored for `ip` while `ttl` of it says it is fresh.
+    fn get(&self, ip: IpAddr, ttl: impl Fn(&V) -> Duration) -> Option<V> {
+        let (value, at) = self.map.get(&ip)?;
+        (at.elapsed() < ttl(value)).then(|| value.clone())
+    }
+
+    /// Stores `value` for `ip`, the oldest entry going past [`CACHE_MAX`].
+    fn put(&mut self, ip: IpAddr, value: V) {
+        if self.map.insert(ip, (value, Instant::now())).is_none() {
+            self.order.push_back(ip);
+        }
+        while self.order.len() > CACHE_MAX {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            }
+        }
+    }
 }
 
 struct Inner {
     enabled: AtomicBool,
     get: Arc<dyn JsonGet>,
     timing: Timing,
-    cache: Mutex<Cache>,
+    cache: Mutex<Cache<Option<Iso2>>>,
+    /// Network owners found (server details, availability): failures are not kept.
+    asns: Mutex<Cache<AsnInfo>>,
     flights: Mutex<HashMap<IpAddr, Arc<Flight>>>,
     backoff: Mutex<HashMap<Provider, Backoff>>,
     next_id: AtomicU64,
@@ -236,6 +269,7 @@ impl Geo {
                 get,
                 timing,
                 cache: Mutex::default(),
+                asns: Mutex::default(),
                 flights: Mutex::default(),
                 backoff: Mutex::default(),
                 next_id: AtomicU64::new(1),
@@ -352,8 +386,9 @@ impl Geo {
         }
     }
 
-    /// ASN, organisation, network and country of `ip` (server details): ipapi.co, then
-    /// ipwho.is, 6 s each. `None` when lookups are off, `ip` is not public or both failed.
+    /// ASN, organisation, network and country of `ip` (server details): kept for an hour, else
+    /// ipapi.co, then ipwho.is, 6 s each. `None` when lookups are off, `ip` is not public or
+    /// both failed.
     pub async fn asn(
         &self,
         ip: IpAddr,
@@ -363,6 +398,10 @@ impl Geo {
         if !self.enabled() || !is_public_ip(ip) {
             return None;
         }
+        let ttl = self.inner.timing.found_ttl;
+        if let Some(info) = self.inner.asns.lock().get(ip, |_| ttl) {
+            return Some(info);
+        }
         for provider in [Provider::IpApiCo, Provider::IpWhoIs] {
             let deadline = Instant::now() + provider.timeout();
             let body = tokio::select! {
@@ -370,7 +409,11 @@ impl Geo {
                 body = self.inner.fetch(provider, ip, routes, deadline) => body,
             };
             if let Some(info) = body.as_ref().and_then(|b| asn_of(provider, b)) {
-                return self.enabled().then_some(info);
+                if !self.enabled() {
+                    return None;
+                }
+                self.inner.asns.lock().put(ip, info.clone());
+                return Some(info);
             }
         }
         None
@@ -436,29 +479,17 @@ impl Inner {
         self.enabled.load(Ordering::SeqCst)
     }
 
-    /// `Some(answer)` while a cached answer is fresh (a country 5 min, "none" 5 s).
+    /// `Some(answer)` while a cached answer is fresh (a country an hour, "none" 5 s).
     fn cached(&self, ip: IpAddr) -> Option<Option<Iso2>> {
-        let cache = self.cache.lock();
-        let (country, at) = cache.map.get(&ip)?;
-        let ttl = if country.is_some() {
-            self.timing.found_ttl
-        } else {
-            self.timing.empty_ttl
-        };
-        (at.elapsed() < ttl).then_some(*country)
+        let timing = self.timing;
+        self.cache.lock().get(ip, |country| match country {
+            Some(_) => timing.found_ttl,
+            None => timing.empty_ttl,
+        })
     }
 
     fn remember(&self, ip: IpAddr, country: Option<Iso2>) {
-        let mut cache = self.cache.lock();
-        let Cache { map, order } = &mut *cache;
-        if map.insert(ip, (country, Instant::now())).is_none() {
-            order.push_back(ip);
-        }
-        while order.len() > CACHE_MAX {
-            if let Some(old) = order.pop_front() {
-                map.remove(&old);
-            }
-        }
+        self.cache.lock().put(ip, country);
     }
 
     /// The live read of `ip` (counted as one more waiting caller), or a new one.
@@ -577,7 +608,8 @@ impl Inner {
                 let failures = table.get(&provider).map_or(0, |b| b.failures) + 1;
                 let until = Instant::now() + backoff(failures, retry_after);
                 table.insert(provider, Backoff { failures, until });
-                tracing::warn!(provider = ?provider, failures, "geo provider rate-limited");
+                // The provider's own pacing, handled by the backoff: no fault of the app.
+                tracing::info!(provider = ?provider, failures, "geo provider rate-limited");
                 None
             }
             Err(Fault::Failed) => None,

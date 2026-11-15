@@ -136,18 +136,20 @@ fn a_new_engine_run_starts_the_window_over_and_the_watchdog_counts_at_once() {
     assert_eq!(d.push(at(35), down), Suspicion::ProxyDown);
 }
 
+/// Owner logs O-5 (15.11): a candidate checked within half an hour is fresh enough (it was
+/// 10 minutes, so three candidates kept the 2-minute tick busy all night).
 #[test]
 fn the_warm_up_checks_the_stalest_of_the_next_candidates_never_the_running_one() {
-    let now = 50 * 60 * 1000;
+    let now = 90 * 60 * 1000;
     let mut a = server("a", "g1");
-    (a.alive, a.latency_ms, a.checked_at) = (Some(true), Some(50), Some(now - 60_000));
+    (a.alive, a.latency_ms, a.checked_at) = (Some(true), Some(50), Some(now - 20 * 60_000));
     let mut b = server("b", "g1");
-    (b.alive, b.checked_at) = (Some(true), Some(now - 20 * 60_000));
+    (b.alive, b.checked_at) = (Some(true), Some(now - 40 * 60_000));
     let c = server("c", "g2");
     let mut running = server("run", "g1");
     running.checked_at = None;
     let all = vec![running, a.clone(), b, c];
-    // a is fresh; b (20 min) and c (never) are stale: never checked goes first.
+    // a (20 min) is fresh; b (40 min) and c (never) are stale: never checked goes first.
     assert_eq!(
         next_to_warm(&all, &Network::default(), "run", now).map(|c| c.id.as_str()),
         Some("c")
@@ -160,6 +162,22 @@ fn the_warm_up_checks_the_stalest_of_the_next_candidates_never_the_running_one()
     );
     fresh[2].checked_at = Some(now - 1_000);
     assert_eq!(next_to_warm(&fresh, &Network::default(), "run", now), None);
+    assert_eq!(
+        WARM_TICK,
+        Duration::from_secs(300),
+        "one check per 5 min at most"
+    );
+}
+
+/// O-5: no warm-up while nobody is at the PC (locked, display off, away all mean no input);
+/// a PC that does not say counts as used.
+#[test]
+fn the_warm_up_waits_for_someone_at_the_pc() {
+    use crate::autopick::presence::{AWAY, present};
+    assert!(present(Some(Duration::from_secs(30))));
+    assert!(!present(Some(AWAY)));
+    assert!(!present(Some(Duration::from_secs(8 * 3600))));
+    assert!(present(None));
 }
 
 /// Review fix a8/b2/b10: the status carries no traffic claim of its own; every step shows the

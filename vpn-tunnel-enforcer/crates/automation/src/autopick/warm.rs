@@ -1,21 +1,26 @@
 //! Keeping the next failover candidates checked while a session runs, so a switch goes to a
-//! server checked recently: one check every few minutes at most, never of the running server,
-//! each behind its server's handshake budget.
+//! server checked recently: one check per five minutes at most (RU research: checks one at a
+//! time, at least 5 minutes apart), only while someone is at the PC, none while the next
+//! candidates are fresh enough, never of the running server, each behind its server's handshake
+//! budget. Owner logs O-5 (15.11): every two minutes all night was 70 Xray starts and as many
+//! handshakes to one camouflage name.
 use std::time::Duration;
 
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{UnixMs, now_ms};
 
-use super::launch::FRESH;
+use super::presence;
 use super::task::AutoPick;
 use super::{Candidate, Network, PickHost, rank};
 use crate::coordinator::Coordinator;
 
 /// At most one candidate check per this period.
-pub const WARM_TICK: Duration = Duration::from_secs(120);
+pub const WARM_TICK: Duration = Duration::from_secs(5 * 60);
 /// How many of the next candidates are kept checked.
 pub const WARM_COUNT: usize = 3;
+/// A candidate checked within this is fresh enough for a switch: the warm-up leaves it alone.
+pub const WARM_FRESH: Duration = Duration::from_secs(30 * 60);
 
 impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
     /// The warm-up task: at most one candidate check per period, only while a server session runs.
@@ -31,6 +36,10 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
             let Some(running) = self.coord.session().filter(|s| s.kind.server()) else {
                 continue;
             };
+            // Locked, display off or away: a switch can check its candidate itself.
+            if !presence::present(presence::idle_for()) {
+                continue;
+            }
             // Nothing automatic after the user's Disconnect or Cancel until they connect again.
             let acts = self.acts();
             if acts.stopped {
@@ -58,7 +67,7 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
 
 /// The candidate to check now: of the next [`WARM_COUNT`] in failover order on `net` (the
 /// running server's group first, then the others), the one checked longest ago, if that is
-/// older than [`FRESH`].
+/// older than [`WARM_FRESH`].
 pub fn next_to_warm<'a>(
     servers: &'a [Candidate],
     net: &Network,
@@ -73,7 +82,7 @@ pub fn next_to_warm<'a>(
         .copied();
     let stale = |c: &&Candidate| {
         c.checked_at
-            .is_none_or(|at| now.saturating_sub(at) >= FRESH.as_millis() as i64)
+            .is_none_or(|at| now.saturating_sub(at) >= WARM_FRESH.as_millis() as i64)
     };
     next.take(WARM_COUNT)
         .filter(stale)

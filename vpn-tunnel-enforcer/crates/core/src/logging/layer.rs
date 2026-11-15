@@ -154,7 +154,9 @@ where
         event.record(&mut fields);
         let meta = event.metadata();
         let line = fields.into_line(meta);
-        if *meta.level() <= Level::WARN {
+        // A line tagged with an `event_code` records a check's own verdict (the health check's
+        // summary): counting it would make the next check report the last one (owner logs O-3).
+        if *meta.level() <= Level::WARN && !line.fields.contains_key("event_code") {
             self.shared.remember(*meta.level(), &line);
         }
         let bytes = encode(&line);

@@ -43,6 +43,7 @@ use crate::svc_tunnel::scope::RunScope;
 pub(crate) use export::ExportSources;
 pub(crate) use network::network_key_now;
 pub(crate) use repair::{RepairHost, WindowsHost};
+pub(crate) use selftest::other_vpn;
 
 /// The UI context of this package for `vpnte_ui::launch`: `Rc<dyn MaintenanceApi>`. Call it
 /// inside the tokio runtime after `backend.tunnel` was set (the projection task starts here

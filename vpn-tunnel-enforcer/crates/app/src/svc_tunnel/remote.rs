@@ -707,14 +707,12 @@ fn absorb(st: &mut State, reply: &StatusReply) {
 }
 
 /// Reads the connection until it ends: events are published in order, each answer reaches its
-/// caller after the events before it.
+/// caller after the events before it. Not stopped by the app's shutdown token: the quit cancels
+/// it before the tunnel's last stop, which must still reach the service and hear its answer
+/// (owner logs O-1: else Quit left the service's session running and read as a failed stop).
 async fn dispatch(inner: Arc<Inner>, mut frames: Frames, gone: CancellationToken) {
     loop {
-        let next = tokio::select! {
-            () = inner.shutdown.cancelled() => break,
-            next = frames.next() => next,
-        };
-        match next {
+        match frames.next().await {
             Ok(Incoming::Answer { id, result }) => {
                 if let Some(tx) = inner.pending.lock().remove(&id) {
                     let _ = tx.send(result);

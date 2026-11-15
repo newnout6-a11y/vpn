@@ -21,8 +21,10 @@ use vpnte_probes::ping::{NetPath, PingSample, PingTarget, ping_all};
 use vpnte_probes::public_ip::IpReader;
 use vpnte_servers::model::ProfileId;
 use vpnte_servers::store::Servers;
+use vpnte_service::proto::{EngineLog, Request};
 use vpnte_tunnel::api::{CaptureKind, ModeKind, TunStatus};
 
+use crate::api_logs::ServiceAnswer;
 use crate::services::Engines;
 use crate::svc_core::notify::Notifier;
 
@@ -103,6 +105,7 @@ pub(super) async fn leak_check(
     status: &TunStatus,
     evidence: IpEvidence,
     self_test: Option<SelfTestResult>,
+    logs: EngineLogs,
     cancel: &CancellationToken,
 ) -> AppResult<CheckReport> {
     let configured = || settings.proxy_override.as_ref().map(|o| o.addr.clone());
@@ -119,10 +122,7 @@ pub(super) async fn leak_check(
             upstream: configured(),
         },
     };
-    let engine_log = match &status.session {
-        Some(s) if status.running => engine_log(s.logs.clone()).await,
-        _ => None,
-    };
+    let engine_log = logs.read().await;
     let input = CheckInput {
         mode,
         tunnel_up: status.running,
@@ -135,6 +135,81 @@ pub(super) async fn leak_check(
         report = vpnte_probes::leak::leak_check(reader, input, cancel) => Ok(report),
         () = cancel.cancelled() => Err(AppError::cancelled()),
     }
+}
+
+/// Where the leak check reads the running session's engine lines.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum EngineLogs {
+    /// No session runs.
+    None,
+    /// This process's engines: their files.
+    Files(Vec<PathBuf>),
+    /// The helper service's: through its pipe (owner logs O-4: their folder is SYSTEM and
+    /// Administrators only, and this user may read his own session's lines only).
+    Service(Vec<EngineLog>),
+}
+
+impl EngineLogs {
+    /// The logs of `status`'s running session; `in_service`: the helper service hosts it.
+    pub(super) fn of(status: &TunStatus, in_service: bool) -> Self {
+        match &status.session {
+            Some(s) if status.running && in_service => {
+                Self::Service(s.logs.iter().filter_map(|p| engine_log_of(p)).collect())
+            }
+            Some(s) if status.running => Self::Files(s.logs.clone()),
+            _ => Self::None,
+        }
+    }
+
+    /// The recent lines; `None` when none could be read.
+    async fn read(self) -> Option<Vec<String>> {
+        match self {
+            Self::None => None,
+            Self::Files(paths) => engine_log(paths).await,
+            Self::Service(logs) => service_engine_log(logs).await,
+        }
+    }
+}
+
+/// The service's name of an engine log file (`sing-box.log` -> `SingBox`).
+fn engine_log_of(path: &Path) -> Option<EngineLog> {
+    match path.file_stem()?.to_str()? {
+        "sing-box" => Some(EngineLog::SingBox),
+        "xray-a" => Some(EngineLog::XrayA),
+        "xray-b" => Some(EngineLog::XrayB),
+        _ => None,
+    }
+}
+
+/// The service's answers for `logs`, each cut to the bytes a file read takes.
+async fn service_engine_log(logs: Vec<EngineLog>) -> Option<Vec<String>> {
+    let mut lines = Vec::new();
+    let mut read_any = false;
+    for log in logs {
+        match crate::api_logs::ask_for(Request::EngineLog(log)).await {
+            Ok(ServiceAnswer::Lines(wire)) => {
+                read_any = true;
+                lines.extend(recent(wire.lines.into_iter().map(|l| l.text).collect()));
+            }
+            Ok(_) => tracing::debug!(?log, "the service gave no engine log"),
+            Err(e) => tracing::debug!(error = %e, ?log, "engine log not read from the service"),
+        }
+    }
+    read_any.then_some(lines)
+}
+
+/// The last lines of `lines` within [`LOG_TAIL_BYTES`], as a file read would give them.
+fn recent(mut lines: Vec<String>) -> Vec<String> {
+    let mut bytes = 0u64;
+    let keep = lines
+        .iter()
+        .rev()
+        .take_while(|l| {
+            bytes += l.len() as u64 + 1;
+            bytes <= LOG_TAIL_BYTES
+        })
+        .count();
+    lines.split_off(lines.len() - keep)
 }
 
 /// The recent lines of the session's engine logs; `None` when none could be read.
@@ -332,6 +407,32 @@ mod tests {
         );
         assert_eq!(session_route(&status(Some(CaptureKind::Tun), None)), None);
         assert_eq!(session_route(&status(None, None)), None);
+    }
+
+    /// Owner logs O-4: a session in the helper service has its engine lines read through the
+    /// pipe (its folder is SYSTEM and Administrators only), one of this process from its files,
+    /// none while idle; the pipe's lines are cut to what a file read takes.
+    #[test]
+    fn the_engine_lines_come_from_where_the_engines_run() {
+        let mut tun = status(Some(CaptureKind::Tun), None);
+        if let Some(s) = tun.session.as_mut() {
+            s.logs = ["sing-box.log", "xray-a.log", "other.log"]
+                .map(|f| PathBuf::from(r"C:\data\logs").join(f))
+                .to_vec();
+        }
+        assert_eq!(
+            EngineLogs::of(&tun, true),
+            EngineLogs::Service(vec![EngineLog::SingBox, EngineLog::XrayA])
+        );
+        let files = tun
+            .session
+            .as_ref()
+            .map(|s| s.logs.clone())
+            .unwrap_or_default();
+        assert_eq!(EngineLogs::of(&tun, false), EngineLogs::Files(files));
+        assert_eq!(EngineLogs::of(&status(None, None), true), EngineLogs::None);
+        let long = vec!["x".repeat(40 * 1024), "y".repeat(30 * 1024), "z".into()];
+        assert_eq!(recent(long), vec!["y".repeat(30 * 1024), "z".to_owned()]);
     }
 
     /// psmart-a1/b6: a refresh that failed while a session came up is tried again through it at

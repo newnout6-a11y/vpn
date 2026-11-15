@@ -454,7 +454,7 @@ async fn the_kill_switch_is_applied_in_the_service() {
 async fn the_split_routes_by_capture_with_increasing_generations() {
     let s = service();
     let local = FakeRuntime::new();
-    let split = super::Split::spawn(local.clone(), remote(&s), CancellationToken::new());
+    let split = super::Split::spawn(local.clone(), remote(&s));
     let mut events = split.subscribe();
     let proxy = StartRequest {
         capture: CaptureKind::Proxy,
@@ -488,6 +488,46 @@ async fn the_split_routes_by_capture_with_increasing_generations() {
     }
     assert_eq!(began, [first.generation, second.generation]);
     assert!(split.status().borrow().running);
+}
+
+/// Owner logs O-1 (15.11): the quit cancels the app's shutdown token first, then stops the
+/// tunnel. That stop still reaches the service (Quit ends its session, owner question 23) and
+/// its answer and status come back, so it is a confirmed stop, not an error notice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_quits_stop_reaches_the_service_after_the_shutdown_began() {
+    let s = service();
+    let split = super::Split::spawn(FakeRuntime::new(), remote(&s));
+    split
+        .start(tun_request(), CancellationToken::new())
+        .await
+        .expect("tunnel start");
+    split.remote().0.shutdown.cancel();
+    let receipt = split.stop(StopOptions::default()).await;
+    assert!(receipt.runtime_stopped, "{receipt:?}");
+    assert_eq!(
+        s.runtime.stops.load(Ordering::SeqCst),
+        1,
+        "the service stopped"
+    );
+    assert!(
+        !split.status().borrow().running,
+        "the stop reached the lifecycle"
+    );
+}
+
+/// O-1, the owner's case: the user had stopped the session; the quit's stop is confirmed too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_stopped_before_the_quit_is_a_confirmed_stop() {
+    let s = service();
+    let split = super::Split::spawn(FakeRuntime::new(), remote(&s));
+    split
+        .start(tun_request(), CancellationToken::new())
+        .await
+        .expect("tunnel start");
+    assert!(split.stop(StopOptions::default()).await.runtime_stopped);
+    split.remote().0.shutdown.cancel();
+    let receipt = split.stop(StopOptions::default()).await;
+    assert!(receipt.runtime_stopped, "{receipt:?}");
 }
 
 /// A restarted service on `pipe` keeping its sessions in `memory`: its session host, runtime and

@@ -190,25 +190,10 @@ fn engine_log_errors() {
     assert_eq!(summarize_engine_log(lines).errors, vec![real.to_owned()]);
 }
 
-/// summarizeSingboxLog: any protocol counts as proxy-out.
+/// The item: clean, real errors, or not checked; per-connection counts are gone (owner logs
+/// O-4: the engine files no longer hold one line per connection).
 #[test]
-fn engine_log_counts() {
-    let s = summarize_engine_log([
-        "INFO [1] outbound/vless[proxy-out]: outbound connection to a:443",
-        "INFO [2] outbound/vless[proxy-out]: outbound connection to b:443",
-        "INFO [3] outbound/direct[direct-out]: outbound connection to 77.88.21.24:443",
-    ]);
-    assert_eq!((s.proxy_out, s.direct_out), (2, 1));
-    let s = summarize_engine_log([
-        "outbound/socks[proxy-out]: x",
-        "outbound/trojan[proxy-out]: x",
-        "outbound/hysteria2[proxy-out]: x",
-    ]);
-    assert_eq!(s.proxy_out, 3);
-    assert_eq!(
-        summarize_engine_log(["outbound/block[block-out]: blocked"]).proxy_out,
-        0
-    );
+fn engine_log_item_states() {
     let lines: Vec<String> =
         vec!["INFO [1] dns: exchanged A example.com. 60 IN A 93.184.216.34".into()];
     let item = engine_log_item(Some(&lines), true);
@@ -216,6 +201,7 @@ fn engine_log_counts() {
         (item.status, item.value.key.as_ref()),
         (CheckStatus::Ok, "probes.leak.check.engineLog.clean")
     );
+    assert!(item.details.is_empty(), "{:?}", item.details);
     assert_eq!(engine_log_item(None, true).status, CheckStatus::NotChecked);
     assert_eq!(
         engine_log_item(Some(&[]), true).status,
@@ -230,6 +216,30 @@ fn engine_log_counts() {
         item.value,
         Msg::new("probes.leak.check.engineLog.errors").arg("count", 1)
     );
+}
+
+/// Owner logs O-3 (15.11): the transport chatter of a night on a provider's XHTTP / REALITY key
+/// (destinations replaced by fakes) is no error: the leak check stays green for it.
+#[test]
+fn transport_chatter_is_no_error() {
+    let chatter = [
+        "protocol error: received DATA after END_STREAM",
+        "2026/11/14 21:40:00.000001 [Info] [42] app/proxyman/outbound: app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: connection ends > proxy/vless/outbound: failed to transfer response payload > write tcp 127.0.0.1:1->127.0.0.1:2: wsasend: An established connection was aborted by the software in your host machine.",
+        "2026/11/14 21:40:00.000001 [Info] [43] app/proxyman/outbound: app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: connection ends > proxy/vless/outbound: failed to transfer response payload > unexpected EOF",
+        "2026/11/14 21:40:00.000001 [Info] [44] transport/internet/splithttp: failed to send upload > transport/internet/splithttp: bad status code:500 Internal Server Error",
+        "2026/11/14 21:40:00.000001 [Info] [45] app/proxyman/inbound: connection ends > proxy/socks: failed to read request > proxy/socks: failed to read request > EOF",
+        "+0300 2026-11-14 21:30:01 ERROR [5 5s] connection: open connection to 192.0.2.7:443 using outbound/direct[direct-out]: dial tcp 192.0.2.7:443: i/o timeout",
+        "+0300 2026-11-14 21:30:01 INFO [6 0ms] router: failed to search process: process not found for 192.0.2.8:5353",
+    ];
+    for line in chatter {
+        assert!(!is_real_error(line), "{line}");
+    }
+    let owned: Vec<String> = chatter.iter().map(|l| (*l).to_owned()).collect();
+    assert_eq!(engine_log_item(Some(&owned), true).status, CheckStatus::Ok);
+    // What still counts: the proxy server itself failing.
+    assert!(is_real_error(
+        "2026/11/14 21:40:00.000001 [Info] [46] proxy/vless/outbound: failed to find an available destination > dial tcp 192.0.2.9:443: i/o timeout"
+    ));
 }
 
 fn conn(rule: &str, host: Option<&str>, dst: Option<&str>, process: Option<&str>) -> ConnRecord {
@@ -503,7 +513,7 @@ fn locale_fragments_match_the_code() {
         ),
         (
             "probes.leak.check.engineLog.",
-            vec!["tunnelOff", "missing", "empty", "counts", "clean", "errors"],
+            vec!["tunnelOff", "missing", "empty", "clean", "errors"],
         ),
         (
             "probes.leak.check.directOut.",

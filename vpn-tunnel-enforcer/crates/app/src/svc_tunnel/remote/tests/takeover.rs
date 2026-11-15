@@ -99,7 +99,7 @@ fn lifecycle(remote: &Remote, dir: &Path) -> (Lifecycle, Split) {
     settings
         .update(|s| s.kill_switch = KillSwitchLevel::Standard)
         .expect("settings");
-    let split = Split::spawn(FakeRuntime::new(), remote.clone(), CancellationToken::new());
+    let split = Split::spawn(FakeRuntime::new(), remote.clone());
     let lifecycle = Lifecycle::spawn(LifecycleDeps {
         runtime: Arc::new(split.clone()),
         profiles: Arc::new(Quiet),

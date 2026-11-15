@@ -64,7 +64,11 @@ pub(super) async fn run(
         Ok(ClientFrame {
             id: fid,
             request: Request::ServiceLog,
-        }) => return own_log(&host, pipe, fid).await,
+        }) => return own_log(&host, pipe, fid, None).await,
+        Ok(ClientFrame {
+            id: fid,
+            request: Request::EngineLog(log),
+        }) => return own_log(&host, pipe, fid, Some(log)).await,
         Ok(other) => return refuse(pipe, other.id, ErrorCode::HelloFirst).await,
         Err(_) => match frame::request_id(&body) {
             Some(fid) => return refuse(pipe, fid, ErrorCode::BadRequest).await,
@@ -199,8 +203,14 @@ async fn update(host: &Arc<Host>, pipe: NamedPipeServer, id: u64, ask: crate::pr
 }
 
 /// `ServiceLog` as the first request (p-logs): the caller's own lines, for any user and without
-/// the controller slot (a `Hello` would end another user's kept session just to read a log).
-async fn own_log(host: &Arc<Host>, pipe: NamedPipeServer, id: u64) {
+/// the controller slot (a `Hello` would end another user's kept session just to read a log);
+/// `EngineLog` the same way (`engine`: p-owner-logs O-4).
+async fn own_log(
+    host: &Arc<Host>,
+    pipe: NamedPipeServer,
+    id: u64,
+    engine: Option<crate::proto::EngineLog>,
+) {
     let client = match ident::client(&pipe) {
         Ok(client) => client,
         Err(err) => return tracing::warn!(error = %err, "client not identifiable; dropped"),
@@ -208,7 +218,11 @@ async fn own_log(host: &Arc<Host>, pipe: NamedPipeServer, id: u64) {
     if !(host.deps.check)(&client) {
         return refuse(pipe, id, ErrorCode::Refused).await;
     }
-    let frame = match host.service_log(&client).await {
+    let answer = match engine {
+        Some(log) => host.engine_log(&client, log).await,
+        None => host.service_log(&client).await,
+    };
+    let frame = match answer {
         Ok(reply) => ServerFrame::Reply {
             id,
             reply: Box::new(reply),

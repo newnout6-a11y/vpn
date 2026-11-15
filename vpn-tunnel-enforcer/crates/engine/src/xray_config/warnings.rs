@@ -10,14 +10,14 @@ use super::hysteria::bbr_preset;
 use super::stream::early_data_dropped;
 
 /// Warnings for running `p` on Xray, in a stable order; empty when nothing is lost.
-/// `tls_compat`: stealth / TLS compatibility is on, whose ClientHello fragmentation and
-/// fingerprint rotation exist only in the sing-box emitter.
+/// `tls_compat`: stealth / TLS compatibility is on; the tunnel resolves its tricks into a
+/// translated profile first, so only an unresolved one loses them.
 pub fn warnings(p: &Profile, tls_compat: bool) -> Vec<Msg> {
     let mut out = Vec::new();
     if let Some(graph) = &p.native_xray {
-        if tls_compat {
-            out.push(Msg::new("engine.xray.warn.stealth"));
-        }
+        // Stealth is not ours to apply to a provider's graph (owner logs O-2): its fingerprint
+        // and tricks are the provider's, and REALITY borrows a real site's handshake (nothing
+        // to fragment against a name list). Nothing is lost, so nothing is said.
         if graph.outbounds.iter().any(xhttp_with_mux) {
             out.push(Msg::new("engine.xray.warn.xhttpMux"));
         }

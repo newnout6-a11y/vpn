@@ -476,16 +476,6 @@ pub trait Confirmations: Send + Sync { fn confirmed_within(&self, age: Duration)
     // (L9-1, review live2-a1). `bring_up` reads the inputs snapshot beside capture / upstream plan /
     // slot A and awaits it at the config (L9-2, timing line `routing inputs ready`). The exit proof
     // takes its first handshake slot before its clocks run (live2-a1): a budget wait is never NoReply.
-    // Lab live-11 L11-1 / L11-2 (p-tun-ready): `fn probe(&self) -> Option<PassProbe>` (default
-    // None) is one probe through the ready capture (TUN: a TCP connect bound to TUN_V4 to
-    // TUN_PROBE_V4:9, completed by sing-box's first route rule `hijack-dns`, nothing leaves; proxy:
-    // none), and `fn config_excluding(&self, plan, parts, servers: &[IpAddr])` (default = `config`)
-    // keeps `servers` (the starting slot's own Xray dials, at most 16) out of the TUN routes; the key
-    // is `config`'s. A TUN start reports «capture ready» (so «Подключено» and a recovery's running)
-    // only after a probe is answered: a fresh probe every 20 ms, bound 3 s; past it WARN «tun passed
-    // no probe in time: going on» and the start goes on. Step lines «tun passes packets ms=» and
-    // «slot servers kept out of the tun servers=»; the S3-05 DNS warm-up runs after the probe. Lab
-    // builds only: `VPNTE_LAB_TUN_STACK=gvisor|mixed` in the TUN host's environment picks the stack.
 pub struct CapturePlan { pub alias: Option<String> /* TUN alias, or the mixed port as text */, pub form: TunForm,
     pub stack: TunStack, pub mtu: u16, pub guard: KillSwitchLevel /* what the protection enforces */,
     pub warnings: Vec<Msg> }
@@ -718,7 +708,9 @@ cleaning up in the background. `Done::warnings` / `ConnError::warnings` are extr
 ## What callers must handle
 - **Notices** arrive only through `Notifier::notify(notice, kind)` (title / body are `Msg`s under
   `tunnel.lifecycle.notice.<name>`): `connected`, `restored` (a runtime reconnect after an outage
-  the user was told about), `disconnected`, `stopFailed`, `stopped` (unexpected end; body =
+  the user was told about), `disconnected`, `stopFailed` (never for the app-quit stop: the process
+  exit ends what this app ran and the service keeps or ends its own run; the `ShutdownReport` logs
+  it, p-owner-logs O-1), `stopped` (unexpected end; body =
   outcome headline), `paused` / `keyRejected` / `reconnecting` (one per outage, after 10 s, its
   body chosen by what holds: `paused.manual`, `reconnecting.{body,direct,other}`; see
   the kill-switch paragraph), `failover` (`name`: the sibling that started, `from`: the

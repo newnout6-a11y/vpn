@@ -507,6 +507,21 @@ async fn shutdown_cleans_up_even_when_the_engine_exit_is_unproven() {
         (c.forensics_stops, c.proxies_stops, c.monitor_stops),
         (1, 1, 1)
     );
+    drop(c);
+    // Owner logs O-1 (15.11): no error notice while the app closes; the report tells the truth.
+    let failed = "tunnel.lifecycle.notice.stopFailed.title".to_owned();
+    assert!(!h.notifier.titles().contains(&failed));
+}
+
+/// Owner logs O-1 (15.11): a user's stop whose engine exit stays unproven still says so.
+#[tokio::test]
+async fn an_unproven_user_stop_still_notifies() {
+    let h = Harness::new();
+    h.lc.connect(local(Owner::Manual)).await.unwrap();
+    h.rt.script.lock().stop_unproven = true;
+    let _ = h.lc.disconnect(user_stop()).await;
+    let failed = "tunnel.lifecycle.notice.stopFailed.title".to_owned();
+    assert!(h.notifier.titles().contains(&failed));
 }
 
 /// A-01 / §7.2 "startup unexpectedly throws": a panicking effect never strands the lane; the

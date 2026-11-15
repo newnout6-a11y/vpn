@@ -139,6 +139,12 @@ pub fn path_admin_only(path: &Path) -> bool {
     path_descriptor(path).is_ok_and(|sd| sd.admin_only_writes())
 }
 
+/// The owner and DACL of `path` grant nothing at all to anyone but SYSTEM, Administrators and
+/// TrustedInstaller (`false` when unreadable): the private folders (p-owner-logs O-4).
+pub fn path_private(path: &Path) -> bool {
+    path_descriptor(path).is_ok_and(|sd| sd.trusted_only(u32::MAX))
+}
+
 /// The owner and DACL of `path` (file or folder).
 fn path_descriptor(path: &Path) -> Result<SecurityDescriptor, WIN32_ERROR> {
     let mut sd = PSECURITY_DESCRIPTOR::default();

@@ -61,12 +61,15 @@ pub struct RoutingResult {
 }
 
 /// The verdict, its message, `split_works` and `ru_goes_direct` (texts of the old app).
+/// `other_vpn`: another VPN's tunnel carries the default route, so the direct path leaves
+/// through it and its own routing decides where a Russian host goes.
 pub fn derive_routing_verdict(
     tunnel_active: bool,
     vpn: Option<IpAddr>,
     direct: Option<IpAddr>,
     smart_ru: bool,
     ru: Option<IpAddr>,
+    other_vpn: bool,
 ) -> (RoutingVerdict, Msg, bool, Option<bool>) {
     use RoutingVerdict::*;
     if !tunnel_active {
@@ -92,6 +95,14 @@ pub fn derive_routing_verdict(
     match (smart_ru, ru) {
         (true, None) => (Partial, msg("probes.routing.smartUnverified"), true, None),
         (true, Some(ru)) if ru == direct => (Ok, msg("probes.routing.smartOk"), true, Some(true)),
+        // Owner logs O-6 (15.11): under another default-route VPN the Russian host leaving by
+        // neither address proves nothing about ours; only our own exit would.
+        (true, Some(ru)) if other_vpn && ru != vpn => (
+            Ok,
+            msg("probes.routing.smartOtherVpn").arg("ru", ru),
+            true,
+            None,
+        ),
         (true, Some(ru)) => (
             Partial,
             msg("probes.routing.ruViaVpn").arg("ru", ru),
@@ -172,6 +183,8 @@ pub struct RoutingInputs {
     pub smart_ru: bool,
     /// Geo lookups off: the Russian echo is not asked.
     pub disable_geo_lookup: bool,
+    /// Another VPN's tunnel carries the default route (winnet `foreign_tun`, `Conflict`).
+    pub other_vpn: bool,
 }
 
 /// Echo requests over reqwest: no system proxy, no redirects, [`ECHO_TIMEOUT`] each.
@@ -302,8 +315,14 @@ pub async fn routing_test_with(
         _ = cancel.cancelled() => return Err(AppError::cancelled()),
         r = work => r,
     };
-    let (verdict, message, split_works, ru_goes_direct) =
-        derive_routing_verdict(inputs.tunnel_active, vpn, direct, inputs.smart_ru, ru);
+    let (verdict, message, split_works, ru_goes_direct) = derive_routing_verdict(
+        inputs.tunnel_active,
+        vpn,
+        direct,
+        inputs.smart_ru,
+        ru,
+        inputs.other_vpn,
+    );
     let tail = |ip: Option<IpAddr>| {
         ip.map(|ip| {
             ip.to_string()

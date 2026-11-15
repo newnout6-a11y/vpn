@@ -250,6 +250,24 @@ impl Host {
             Request::ForgetMe => self.forget(client).await,
             Request::Update(ask) => self.update(&client.user, ask).await,
             Request::ServiceLog => self.service_log(client).await,
+            Request::EngineLog(log) => self.engine_log(client, log).await,
+        }
+    }
+
+    /// One engine log of the caller's own session (p-owner-logs O-4): the current file's tail
+    /// when the engines run or ran last for him, else nothing ([`crate::logs::engine_for`]).
+    pub(super) async fn engine_log(
+        &self,
+        client: &ClientInfo,
+        log: crate::proto::EngineLog,
+    ) -> Result<Reply, WireError> {
+        let owner = self.session_user.lock().clone();
+        let user = client.user.clone();
+        let read = move || crate::logs::engine_for(log, &user, owner.as_deref());
+        match tokio::task::spawn_blocking(read).await {
+            Ok(Ok(lines)) => Ok(Reply::EngineLog(lines)),
+            Ok(Err(err)) => Err(WireError::failed(&AppError::from(err))),
+            Err(err) => Err(WireError::failed(&AppError::internal(err))),
         }
     }
 

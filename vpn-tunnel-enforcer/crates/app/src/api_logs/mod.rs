@@ -11,7 +11,6 @@ mod sources;
 #[cfg(test)]
 mod tests;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -19,6 +18,7 @@ use tokio::sync::watch;
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::logging;
 use vpnte_core::store::{Mode, ReadOnlyReason};
+use vpnte_service::proto::EngineLog;
 use vpnte_tunnel::api::CaptureKind;
 use vpnte_ui::logs::{
     ArtifactReport, ExportFormat, LogSource, LogTail, LogsApi, LogsSnapshot, TailNote,
@@ -31,7 +31,7 @@ use crate::support::{blocking, detached};
 use crate::svc_journal::{self, Journal};
 
 pub use sources::{
-    Folders, PipeServiceLogs, ServiceAnswer, ServiceLogs, ask_service, engine_place,
+    Folders, PipeServiceLogs, ServiceAnswer, ServiceLogs, ask_for, ask_service, engine_place,
 };
 
 /// [`LogsApi`] over the backend.
@@ -193,24 +193,35 @@ impl LogsApi for LogsService {
     }
 
     async fn read_log(&self, source: LogSource) -> AppResult<LogTail> {
-        let (stem, (dir, note)) = match source {
-            LogSource::App => ("app", (self.shared.folders.user.clone(), TailNote::None)),
-            LogSource::SingBox => ("sing-box", self.engine_folder()),
-            LogSource::Xray => ("xray", self.engine_folder()),
+        // Slot A: every session's Xray starts there (`xray.log` was never written).
+        let (stem, engine) = match source {
+            LogSource::App => ("app", None),
+            LogSource::SingBox => ("sing-box", Some(EngineLog::SingBox)),
+            LogSource::Xray => ("xray-a", Some(EngineLog::XrayA)),
             LogSource::Service => {
                 let answer = self.service_logs.read().await?;
                 return Ok(sources::service_tail(answer));
             }
         };
+        let note = match engine {
+            // p-owner-logs O-4: the service's engine logs are SYSTEM and Administrators only;
+            // this user's own session's lines come through its pipe.
+            Some(log) => match self.engine_place() {
+                (true, note) => {
+                    let answer = self.service_logs.engine(log).await?;
+                    return Ok(sources::engine_tail(answer, note));
+                }
+                (false, note) => note,
+            },
+            None => TailNote::None,
+        };
+        let dir = self.shared.folders.user.clone();
         blocking(move || sources::read_tail(&dir, stem, note)).await
     }
 
-    async fn open_log_folder(&self, source: LogSource) -> AppResult<()> {
-        let dir = match source {
-            LogSource::SingBox | LogSource::Xray => self.engine_folder().0,
-            LogSource::App | LogSource::Service => self.shared.folders.user.clone(),
-        };
-        vpnte_winnet::shell::open_folder(&dir).await
+    /// Always the user's own folder: the service's is not his to open (O-4).
+    async fn open_log_folder(&self, _source: LogSource) -> AppResult<()> {
+        vpnte_winnet::shell::open_folder(&self.shared.folders.user).await
     }
 
     async fn copy_text(&self, text: String) -> AppResult<()> {
@@ -221,9 +232,9 @@ impl LogsApi for LogsService {
 }
 
 impl LogsService {
-    /// The folder of the engine log to show and the calm line about it: the running session's
-    /// capture, else the last one this app saw (or the newest stored session's).
-    fn engine_folder(&self) -> (PathBuf, TailNote) {
+    /// Whether the engine log to show is the helper service's, and the calm line about it: the
+    /// running session's capture, else the last one this app saw (or the newest stored one's).
+    fn engine_place(&self) -> (bool, TailNote) {
         let shared = &self.shared;
         let (running, service) = match shared.backend.tunnel() {
             Ok(tunnel) => (
@@ -239,6 +250,6 @@ impl LogsService {
             }
             *last
         };
-        shared.folders.engine(capture, service)
+        engine_place(capture, service)
     }
 }

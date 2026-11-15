@@ -285,7 +285,9 @@ pub fn init(dir: &Path, debug: bool) -> AppResult<LogGuard>; // global subscribe
 #[must_use] pub struct LogGuard;           // keep in main; Drop drains the queue (≤ 5 s) and stops the writer
 pub fn set_debug(on: bool);                // ui.debug_log at runtime
 pub fn flush();                            // wait (≤ 2 s) until queued lines are on disk
-pub fn recent_problems() -> Vec<Problem>;  // last 200 WARN / ERROR events of this run, oldest first
+pub fn recent_problems() -> Vec<Problem>;  // last 200 WARN / ERROR events of this run, oldest first;
+                                           // events with an `event_code` field (a check's own verdict) are
+                                           // written but not kept (p-owner-logs O-3)
 pub struct Problem { pub at: UnixMs, pub level: tracing::Level, pub target: String, pub msg: String }
 #[derive(Serialize, Deserialize)]
 pub struct LogLine { pub ts: String, pub level: String, pub target: String, pub msg: String,
@@ -313,7 +315,9 @@ impl RotatingFile {
     pub fn open(dir: &Path, stem: &str, max_bytes: u64, tail_lines: usize) -> io::Result<Self>; // stem
                                            // [a-z0-9-]+; a path already open returns that live writer (its cap
                                            // and tail kept), which reopens <stem>.log on its next write
-    pub fn engine(dir: &Path, stem: &str) -> io::Result<Self>;   // 10 MiB + .1.log, 64-line tail
+    pub fn engine(dir: &Path, stem: &str) -> io::Result<Self>;   // 10 MiB + .1.log, 64-line tail; leaves out
+                                           // routine per-connection lines (info lines with a connection id or
+                                           // `INFO dns:`, no failure word: p-owner-logs O-4); the pipe keeps them
     pub fn write_line(&self, line: &str) -> io::Result<()>;      // redact::for_log, then file + tail
     pub fn tail(&self) -> Vec<String>;                           // redacted, oldest first
     pub fn path(&self) -> PathBuf;

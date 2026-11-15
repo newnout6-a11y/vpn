@@ -17,7 +17,7 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::{Context, SubscriberExt as _};
 use vpnte_core::logging::{self, LogFile, RotatingFile};
 
-use crate::proto::{ServiceLogLine, ServiceLogWire};
+use crate::proto::{EngineLog, ServiceLogLine, ServiceLogWire};
 
 /// File stem in the private folder (`service.log`, `service.1.log`).
 pub const STEM: &str = "service";
@@ -98,6 +98,48 @@ pub fn lines_for(dir: &Path, user: &str) -> io::Result<ServiceLogWire> {
                 offset: line.offset,
                 text,
             })
+        })
+        .collect();
+    let truncated = tail.truncated || lines.len() > REPLY_LINES;
+    if lines.len() > REPLY_LINES {
+        lines.drain(..lines.len() - REPLY_LINES);
+    }
+    Ok(ServiceLogWire { lines, truncated })
+}
+
+/// One engine log as `user` may read it (p-owner-logs O-4: the folder is SYSTEM and
+/// Administrators only): the current session's lines for the user whose session the engines run
+/// or ran last (`session`); nothing for anyone else, and nothing before [`init`].
+pub fn engine_for(log: EngineLog, user: &str, session: Option<&str>) -> io::Result<ServiceLogWire> {
+    let root = LOG.get().and_then(|l| l.dir.parent());
+    engine_in(root, log, user, session)
+}
+
+/// [`engine_for`] over the data folder `root` (the service log's folder is `root\service`).
+fn engine_in(
+    root: Option<&Path>,
+    log: EngineLog,
+    user: &str,
+    session: Option<&str>,
+) -> io::Result<ServiceLogWire> {
+    match root {
+        Some(root) if session == Some(user) => {
+            engine_lines(&crate::paths::DataFiles::new(root).logs, log.stem())
+        }
+        _ => Ok(ServiceLogWire::default()),
+    }
+}
+
+/// The last lines of `<stem>.log` in `dir`: the current engine session's (the engines move the
+/// previous session's away at each start; that file, maybe another user's, is never read).
+pub fn engine_lines(dir: &Path, stem: &str) -> io::Result<ServiceLogWire> {
+    let tail = logging::tail_lines(dir, &LogFile::engine(stem), logging::TAIL_MAX_BYTES)?;
+    let mut lines: Vec<ServiceLogLine> = tail
+        .lines
+        .into_iter()
+        .map(|line| ServiceLogLine {
+            offset: line.offset,
+            text: line.text,
         })
         .collect();
     let truncated = tail.truncated || lines.len() > REPLY_LINES;

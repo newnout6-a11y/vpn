@@ -6,7 +6,7 @@ use std::time::Duration;
 use vpnte_base::{AppError, AppResult};
 use vpnte_core::logging::{self, LogFile};
 use vpnte_service::pipe::client::{CallError, Client, ServerCheck};
-use vpnte_service::proto::{ErrorCode, Reply, Request, ServiceLogWire};
+use vpnte_service::proto::{EngineLog, ErrorCode, Reply, Request, ServiceLogWire};
 use vpnte_tunnel::api::CaptureKind;
 use vpnte_tunnel::history::{Entry, Route};
 use vpnte_ui::logs::{LogTail, TailLine, TailNote};
@@ -16,34 +16,18 @@ use crate::boot::service::Presence;
 /// A first frame and its answer on a local pipe.
 const ASK: Duration = Duration::from_secs(5);
 
-/// The folders the logs are read from.
+/// The folders the logs are read from: the helper service's engine logs come through its pipe
+/// (p-owner-logs O-4), never from its folder.
 #[derive(Debug, Clone)]
 pub struct Folders {
     /// The user's logs folder (app.log; engines of Proxy mode and of a Tunnel run in this app).
     pub user: PathBuf,
-    /// The helper service's logs folder (engines of its Tunnel sessions); `None` when the
-    /// known folder could not be resolved.
-    pub service: Option<PathBuf>,
 }
 
 impl Folders {
-    /// The real folders of this user and of the installed service.
+    /// The real folder of this user.
     pub fn of(user: PathBuf) -> Self {
-        let service = vpnte_service::paths::data_dir()
-            .ok()
-            .map(|root| vpnte_service::paths::DataFiles::new(&root).logs);
-        Self { user, service }
-    }
-}
-
-impl Folders {
-    /// The folder of the engine log of a session with `capture` and the calm line about it.
-    pub fn engine(&self, capture: Option<CaptureKind>, service: bool) -> (PathBuf, TailNote) {
-        let (in_service, note) = engine_place(capture, service);
-        match (&self.service, in_service) {
-            (Some(dir), true) => (dir.clone(), note),
-            _ => (self.user.clone(), note),
-        }
+        Self { user }
     }
 }
 
@@ -105,6 +89,11 @@ pub enum ServiceAnswer {
 #[async_trait::async_trait(?Send)]
 pub trait ServiceLogs {
     async fn read(&self) -> AppResult<ServiceAnswer>;
+    /// One engine log of this user's Tunnel session in the service (p-owner-logs O-4: its folder
+    /// is SYSTEM and Administrators only). Default: an older service's answer.
+    async fn engine(&self, _log: EngineLog) -> AppResult<ServiceAnswer> {
+        Ok(ServiceAnswer::Old)
+    }
 }
 
 /// Over the installed service's pipe (see [`ask_service`]).
@@ -115,6 +104,10 @@ impl ServiceLogs for PipeServiceLogs {
     async fn read(&self) -> AppResult<ServiceAnswer> {
         ask_service().await
     }
+
+    async fn engine(&self, log: EngineLog) -> AppResult<ServiceAnswer> {
+        ask_for(Request::EngineLog(log)).await
+    }
 }
 
 /// This user's lines from the installed service: a connection of its own, the request as its
@@ -122,6 +115,11 @@ impl ServiceLogs for PipeServiceLogs {
 /// session). The service is found through `boot::service`, the one gate to it (tests never
 /// reach a service installed on this PC).
 pub async fn ask_service() -> AppResult<ServiceAnswer> {
+    ask_for(Request::ServiceLog).await
+}
+
+/// [`ask_service`] for `request` (`ServiceLog` or `EngineLog`).
+pub async fn ask_for(request: Request) -> AppResult<ServiceAnswer> {
     let Some(exe) = crate::boot::service::installed_binary().map_err(AppError::internal)? else {
         return Ok(ServiceAnswer::NotInstalled);
     };
@@ -136,8 +134,8 @@ pub async fn ask_service() -> AppResult<ServiceAnswer> {
                 };
             }
         };
-        match client.call(Request::ServiceLog).await {
-            Ok(Reply::ServiceLog(log)) => Ok(ServiceAnswer::Lines(log)),
+        match client.call(request).await {
+            Ok(Reply::ServiceLog(log) | Reply::EngineLog(log)) => Ok(ServiceAnswer::Lines(log)),
             Ok(other) => {
                 tracing::warn!(?other, "unexpected service reply to its log");
                 Ok(ServiceAnswer::Old)
@@ -179,6 +177,18 @@ pub fn service_tail(answer: ServiceAnswer) -> LogTail {
     LogTail {
         note,
         ..LogTail::default()
+    }
+}
+
+/// An engine log the service answered with, under the session's calm line `note`; an answer
+/// without lines says why, as the service log's does.
+pub fn engine_tail(answer: ServiceAnswer, note: TailNote) -> LogTail {
+    match answer {
+        ServiceAnswer::Lines(log) => LogTail {
+            note,
+            ..lines_tail(log)
+        },
+        other => service_tail(other),
     }
 }
 

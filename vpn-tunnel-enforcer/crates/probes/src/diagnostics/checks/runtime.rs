@@ -1,7 +1,4 @@
 //! Runtime items: Windows services the tunnel needs, the engine's and the app's own logs.
-use std::sync::LazyLock;
-
-use regex::Regex;
 use vpnte_base::Msg;
 use vpnte_base::types::Verdict;
 
@@ -76,26 +73,12 @@ pub fn service_items(core: &[ServiceRow], other: &[ServiceRow]) -> [CheckItem; 2
     ]
 }
 
-static ENGINE_ERROR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(fatal|error|panic|failed|timeout|refused|denied)\b").expect("static regex")
-});
-static CLOSED_NOISE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\bERROR\b.*connection (upload|download) closed\b.*(forcibly closed by the remote host|operation was canceled|context canceled)")
-        .expect("static regex")
-});
-
-/// sing-box lines that look like errors but are routine (peer resets, cancelled streams, the
-/// process lookup an unelevated run cannot do).
-pub fn is_benign_engine_noise(line: &str) -> bool {
-    CLOSED_NOISE.is_match(line)
-        || line.contains("router: failed to search process: Access is denied")
-}
-
-/// Engine log lines that report a problem.
+/// Engine log lines that report a problem: the leak check's definition of a real error, so both
+/// checks call the same lines routine (owner logs O-3).
 pub fn engine_errors<'a>(lines: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
     lines
         .into_iter()
-        .filter(|l| ENGINE_ERROR.is_match(l) && !is_benign_engine_noise(l))
+        .filter(|l| crate::leak::check::is_real_error(l))
         .collect()
 }
 

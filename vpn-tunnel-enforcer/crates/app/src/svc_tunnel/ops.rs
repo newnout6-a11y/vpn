@@ -299,12 +299,14 @@ impl TunnelOps for TunnelService {
         let status = self.status();
         let evidence = self.ip.ip.evidence();
         let self_test = self.ip.leaks.as_ref().and_then(|l| l.latest.lock().clone());
+        let logs = probe::EngineLogs::of(&status, self.runtime.in_service());
         probe::leak_check(
             self.ip.reader(),
             &settings,
             &status,
             evidence,
             self_test,
+            logs,
             &cancel,
         )
         .await

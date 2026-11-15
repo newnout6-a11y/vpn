@@ -6,6 +6,7 @@
 //! Rules for callers: keep the default target (events whose target does not start with `vpnte`
 //! count as library noise and are kept from warn only); put ids in the `profile`, `group`, `op`,
 //! `corr` or `slot` fields, the only strings written verbatim (a UUID in free text is masked).
+mod flows;
 mod lane;
 mod layer;
 mod rotate;

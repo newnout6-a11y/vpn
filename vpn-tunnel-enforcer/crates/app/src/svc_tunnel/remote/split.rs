@@ -49,11 +49,10 @@ struct Inner {
 }
 
 impl Split {
-    pub(in crate::svc_tunnel) fn spawn(
-        local: Arc<dyn Runtime>,
-        remote: Remote,
-        cancel: CancellationToken,
-    ) -> Self {
+    /// The forwarder lives as long as the hosts do, not until the app's shutdown token: the
+    /// quit cancels that before the tunnel's last stop, whose status must still reach the
+    /// lifecycle (owner logs O-1).
+    pub(in crate::svc_tunnel) fn spawn(local: Arc<dyn Runtime>, remote: Remote) -> Self {
         let (flush, flushes) = mpsc::channel(8);
         let status = watch::channel(local.status().borrow().clone()).0;
         let inner = Arc::new(Inner {
@@ -76,12 +75,17 @@ impl Split {
                 inner.remote.status(),
             ),
         ];
-        tokio::spawn(forward(inner.clone(), sources, flushes, cancel));
+        tokio::spawn(forward(inner.clone(), sources, flushes));
         Self(inner)
     }
 
     pub(in crate::svc_tunnel) fn remote(&self) -> &Remote {
         &self.0.remote
+    }
+
+    /// The lifecycle drives the helper service: its engines and their logs are there.
+    pub(in crate::svc_tunnel) fn in_service(&self) -> bool {
+        self.0.active.lock().0 == Host::Service
     }
 
     /// Tunnel mode fails over through `policy` (speed audit conn2; set once at start-up).
@@ -164,13 +168,11 @@ async fn forward(
     inner: Arc<Inner>,
     mut events: [Source; 2],
     mut flushes: mpsc::Receiver<oneshot::Sender<()>>,
-    cancel: CancellationToken,
 ) {
     loop {
         let [(_, local, local_status), (_, remote, remote_status)] = &mut events;
         tokio::select! {
             biased;
-            () = cancel.cancelled() => return,
             // A host whose stream closed is gone (its actor ended): nothing more to mirror.
             e = local.recv() => if !inner.pass(Host::Local, e, local_status) { return },
             e = remote.recv() => if !inner.pass(Host::Service, e, remote_status) { return },

@@ -123,7 +123,6 @@
           "tunnelOff": "The tunnel is off",
           "missing": "The engine log is unavailable — not checked",
           "empty": "The engine log is empty — not checked",
-          "counts": "proxy-out: {{proxy}}; direct-out: {{direct}}; dns: {{dns}}",
           "clean": "No errors",
           "errors_one": "{{count}} error",
           "errors_few": "{{count}} errors",

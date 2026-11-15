@@ -584,3 +584,35 @@ async fn asn_lookups() {
         "disabled: no ASN request"
     );
 }
+
+/// Owner logs O-7 (15.11): a network owner found once is kept (server details and availability
+/// asked ipapi.co again each time, and it rate-limits a shared VPN exit); a failure is not kept.
+#[tokio::test]
+async fn asn_answers_are_kept_for_a_while() {
+    let (geo, fake) = scripted(|n, url| match (n, url.contains("ipapi.co")) {
+        (0, true) => (Duration::ZERO, Err(Fault::RateLimited(None))),
+        (_, true) => (
+            Duration::ZERO,
+            Ok(json!({ "asn": "AS64500", "org": "Example" })),
+        ),
+        (_, false) => (Duration::ZERO, Err(Fault::Failed)),
+    });
+    let cancel = CancellationToken::new();
+    let at = ip("95.216.1.7");
+    assert_eq!(
+        geo.asn(at, &[], &cancel).await,
+        None,
+        "rate-limited, ipwho.is failed"
+    );
+    geo.inner.backoff.lock().clear();
+    let found = geo.asn(at, &[], &cancel).await.expect("found");
+    let calls = fake.calls.load(Ordering::SeqCst);
+    assert_eq!(geo.asn(at, &[], &cancel).await, Some(found), "kept");
+    assert_eq!(fake.calls.load(Ordering::SeqCst), calls, "no new request");
+    tokio::time::sleep(FAST.found_ttl).await;
+    assert!(geo.asn(at, &[], &cancel).await.is_some());
+    assert!(
+        fake.calls.load(Ordering::SeqCst) > calls,
+        "asked again once stale"
+    );
+}

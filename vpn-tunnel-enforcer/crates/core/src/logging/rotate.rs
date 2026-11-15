@@ -40,6 +40,8 @@ struct Inner {
     checked: Instant,
     tail: VecDeque<String>,
     tail_cap: usize,
+    /// Engine logs leave out the routine per-connection lines ([`flows`](super::flows)).
+    skip_flows: bool,
 }
 
 impl RotatingFile {
@@ -69,6 +71,7 @@ impl RotatingFile {
             checked: Instant::now(),
             tail: VecDeque::with_capacity(tail_lines),
             tail_cap: tail_lines,
+            skip_flows: false,
         };
         inner.file()?;
         let inner = Arc::new(Mutex::new(inner));
@@ -76,19 +79,25 @@ impl RotatingFile {
         Ok(Self { inner })
     }
 
-    /// Engine log: 10 MiB per generation, last 64 lines in memory.
+    /// Engine log: 10 MiB per generation, last 64 lines in memory, without the routine
+    /// per-connection lines (owner logs O-4: the engine's pipe still carries them).
     pub fn engine(dir: &Path, stem: &str) -> io::Result<Self> {
-        Self::open(dir, stem, ENGINE_LOG_MAX_BYTES, ENGINE_TAIL_LINES)
+        let file = Self::open(dir, stem, ENGINE_LOG_MAX_BYTES, ENGINE_TAIL_LINES)?;
+        file.inner.lock().skip_flows = true;
+        Ok(file)
     }
 
     /// Appends one line after [`redact::for_log`]. The tail keeps the line even when the disk
     /// write fails; a failed write loses only this line (the file is reopened on the next one).
     pub fn write_line(&self, line: &str) -> io::Result<()> {
         let clean = redact::for_log(line.trim_end_matches(['\r', '\n']));
+        let mut inner = self.inner.lock();
+        if inner.skip_flows && super::flows::is_routine_flow(&clean) {
+            return Ok(());
+        }
         let mut bytes = Vec::with_capacity(clean.len() + 1);
         bytes.extend_from_slice(clean.as_bytes());
         bytes.push(b'\n');
-        let mut inner = self.inner.lock();
         if inner.tail_cap > 0 {
             if inner.tail.len() == inner.tail_cap {
                 inner.tail.pop_front();

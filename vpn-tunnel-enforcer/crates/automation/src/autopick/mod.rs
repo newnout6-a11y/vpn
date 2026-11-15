@@ -14,6 +14,7 @@
 mod config;
 mod launch;
 mod network;
+mod presence;
 mod proof;
 mod rank;
 mod rescue;
@@ -47,7 +48,7 @@ pub use rank::{Network, rank};
 pub use stall::{Detector, Suspicion};
 pub use status::{Exposure, Phase, PickStatus};
 pub use task::AutoPick;
-pub use warm::{WARM_COUNT, WARM_TICK, next_to_warm};
+pub use warm::{WARM_COUNT, WARM_FRESH, WARM_TICK, next_to_warm};
 
 /// A list server as the automatic choice sees it (never logged: names only in notices).
 #[derive(Debug, Clone, PartialEq, Eq)]

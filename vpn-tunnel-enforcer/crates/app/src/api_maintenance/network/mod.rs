@@ -6,6 +6,7 @@
 //! network it describes: a change drops the check in flight, and a result is published only
 //! while the network it began on is still the current one.
 mod auto;
+mod in_session;
 mod session;
 
 use std::future::Future;
@@ -133,7 +134,7 @@ async fn run(
         let status = shared.backend.tunnel()?.runtime_status().borrow().clone();
         let capture = status.running.then_some(status.capture).flatten();
         let own_tun = status.session.as_ref().and_then(|s| s.tun_luid);
-        let probe = LiveProbe::new(direct_out(&status), own_tun).await?;
+        let probe = in_session::CheckProbe(LiveProbe::new(direct_out(&status), own_tun).await?);
         let facts = measure(&probe, scope, || server_address(shared), &cancel).await?;
         let canary = match capture {
             Some(CaptureKind::Tun) => Some(dns_canary(&WireLookup).await),
@@ -145,7 +146,7 @@ async fn run(
         if identity::read().await != network {
             return Err(changed());
         }
-        Ok((netmode::report(&facts, probe.via_session()), canary))
+        Ok((netmode::report(&facts, probe.0.via_session()), canary))
     };
     let (report, canary) = tokio::select! {
         biased;

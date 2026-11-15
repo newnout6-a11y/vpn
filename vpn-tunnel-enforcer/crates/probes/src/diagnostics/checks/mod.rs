@@ -16,7 +16,7 @@ pub use network::{
 };
 pub use runtime::{CORE_SERVICES, OTHER_SERVICES, app_log_item, service_items, tun_log_item};
 #[cfg(test)]
-pub use runtime::{FRESH_PROBLEM_MS, engine_errors, is_benign_engine_noise};
+pub use runtime::{FRESH_PROBLEM_MS, engine_errors};
 
 static USERINFO: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)([a-z][a-z0-9+.-]*://)[^/@\s]*@").expect("static regex"));

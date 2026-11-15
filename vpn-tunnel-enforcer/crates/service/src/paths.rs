@@ -6,12 +6,16 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use windows::Win32::Security::Authorization::{SE_FILE_OBJECT, SetNamedSecurityInfoW};
+use windows::Win32::Security::{
+    ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION,
+};
 use windows::Win32::Storage::FileSystem::CreateDirectoryW;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::{
     FOLDERID_ProgramData, FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
 };
-use windows::core::{GUID, HSTRING};
+use windows::core::{BOOL, GUID, HSTRING};
 
 use crate::sddl::{self, SecurityDescriptor};
 
@@ -49,7 +53,8 @@ pub fn data_dir() -> io::Result<PathBuf> {
 /// Files inside the data folder.
 pub struct DataFiles {
     pub root: PathBuf,
-    /// Engine logs of TUN sessions (users may read them).
+    /// Engine logs of TUN sessions: SYSTEM and Administrators only (owner logs O-4: they name
+    /// what a user reached through the tunnel); a user reads his own session's through the pipe.
     pub logs: PathBuf,
     /// SYSTEM and Administrators only: the users list, the kill-switch settings (exception paths
     /// name user folders) and the service log (client images) are no other user's business, and a
@@ -77,10 +82,16 @@ impl DataFiles {
         }
     }
 
-    /// Creates or re-secures the data folder and its private part.
+    /// Creates or re-secures the data folder, its private part and the engine logs.
     pub fn secure(&self) -> io::Result<()> {
         secure_dir(&self.root)?;
-        secure_dir_as(&self.private, sddl::PRIVATE_DIR_SDDL)
+        secure_dir_as(&self.private, sddl::PRIVATE_DIR_SDDL)?;
+        // Best effort, as the logs folder always was: the tunnel runs without it and the next
+        // start tries again (users cannot change it inside the secured root anyway).
+        if let Err(err) = secure_dir_as(&self.logs, sddl::PRIVATE_DIR_SDDL) {
+            tracing::warn!(error = %err, "engine logs folder not secured");
+        }
+        Ok(())
     }
 }
 
@@ -105,7 +116,15 @@ pub fn secure_dir(dir: &Path) -> io::Result<()> {
 fn secure_dir_as(dir: &Path, folder_sddl: &str) -> io::Result<()> {
     if dir.exists() {
         if sddl::path_admin_only(dir) {
-            return Ok(());
+            // Users cannot change it. A private folder they may still read (the logs of builds
+            // before 15.11 inherited «Users: read») gets its DACL in place: its files keep
+            // their lines and take the new entries by inheritance.
+            let private = folder_sddl == sddl::PRIVATE_DIR_SDDL;
+            return if private && !sddl::path_private(dir) {
+                set_dacl(dir, folder_sddl)
+            } else {
+                Ok(())
+            };
         }
         tracing::warn!(dir = %dir.display(), "folder writable by users; recreated");
         // std removes junctions and symlinks themselves, never their targets.
@@ -119,4 +138,88 @@ fn secure_dir_as(dir: &Path, folder_sddl: &str) -> io::Result<()> {
     // SAFETY: valid path and attributes (pointing at `sd`, alive for the call).
     unsafe { CreateDirectoryW(&HSTRING::from(dir.as_os_str()), Some(&attributes)) }
         .map_err(io::Error::other)
+}
+
+/// Puts the DACL of `folder_sddl` on `dir`, protected from the parent's; Windows passes its
+/// inheritable entries on to everything inside (`SetNamedSecurityInfoW` propagates them).
+fn set_dacl(dir: &Path, folder_sddl: &str) -> io::Result<()> {
+    let sd = SecurityDescriptor::from_sddl(folder_sddl).map_err(io::Error::other)?;
+    let (mut present, mut defaulted) = (BOOL(0), BOOL(0));
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    // SAFETY: `sd` is a valid descriptor that outlives `dacl`; out pointers are locals.
+    unsafe { GetSecurityDescriptorDacl(sd.as_ptr(), &mut present, &mut dacl, &mut defaulted) }
+        .map_err(io::Error::other)?;
+    if !present.as_bool() || dacl.is_null() {
+        return Err(io::Error::other("descriptor without a DACL"));
+    }
+    let info = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
+    // SAFETY: valid path string; `dacl` points into `sd`, alive for the call.
+    let status = unsafe {
+        SetNamedSecurityInfoW(
+            &HSTRING::from(dir.as_os_str()),
+            SE_FILE_OBJECT,
+            info,
+            None,
+            None,
+            Some(dacl),
+            None,
+        )
+    };
+    status.ok().map_err(io::Error::other)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{DataFiles, set_dacl};
+    use crate::sddl::{self, SecurityDescriptor};
+
+    /// Owner logs O-4: the engine logs sit beside the private part, under a descriptor that
+    /// grants users nothing (a user reads his own session's lines through the pipe).
+    #[test]
+    fn the_engine_logs_get_the_private_descriptor() {
+        let files = DataFiles::new(Path::new(r"C:\data"));
+        assert_eq!(files.logs, Path::new(r"C:\data\logs"));
+        let sd = SecurityDescriptor::from_sddl(sddl::PRIVATE_DIR_SDDL).expect("valid SDDL");
+        assert!(sd.admin_only_writes());
+        assert!(
+            !sddl::PRIVATE_DIR_SDDL.contains(";BU)") && !sddl::PRIVATE_DIR_SDDL.contains(";IU)")
+        );
+    }
+
+    /// O-4 on a real folder: a fresh install creates the logs folder private, and the folder of
+    /// an older install (users may read it, a log inside) is repaired in place at the next start,
+    /// the log with it.
+    #[test]
+    #[ignore = "needs elevation"]
+    fn elevated_the_engine_logs_are_private_and_repaired_in_place() {
+        assert!(vpnte_winnet::elevation::is_elevated(), "run elevated");
+        let root = std::env::temp_dir().join(format!("vpnte-logs-acl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let files = DataFiles::new(&root);
+        let fresh = files.secure().map(|()| sddl::path_private(&files.logs));
+        // As before 15.11: the folder inherited «Users: read», and so did its logs.
+        let old = set_dacl(&files.logs, sddl::ADMIN_ONLY_DIR_SDDL)
+            .and_then(|()| std::fs::write(files.logs.join("sing-box.log"), b"line\n"));
+        let private_before = sddl::path_private(&files.logs.join("sing-box.log"));
+        let repaired = files.secure().map(|()| {
+            (
+                sddl::path_private(&files.logs),
+                sddl::path_private(&files.logs.join("sing-box.log")),
+                std::fs::read(files.logs.join("sing-box.log")).ok(),
+            )
+        });
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(fresh.expect("secured"), "a fresh logs folder is private");
+        old.expect("an older install's folder");
+        assert!(!private_before, "users could read the old log");
+        let (folder, log, kept) = repaired.expect("repaired");
+        assert!(folder && log, "repaired: folder {folder}, log {log}");
+        assert_eq!(
+            kept.as_deref(),
+            Some(&b"line\n"[..]),
+            "the log keeps its lines"
+        );
+    }
 }

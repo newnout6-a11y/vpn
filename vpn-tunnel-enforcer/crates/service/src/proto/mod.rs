@@ -105,6 +105,30 @@ pub enum Request {
     /// lines and those of his own sessions. A first frame like `Update` (or after `Hello`); an
     /// older service answers `badRequest`.
     ServiceLog,
+    /// One engine log of the caller's own Tunnel session (p-owner-logs O-4: the folder is
+    /// SYSTEM and Administrators only). A first frame like `ServiceLog`; an older service
+    /// answers `badRequest`.
+    EngineLog(EngineLog),
+}
+
+/// The engine logs a client may ask for: the service's own names, never a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EngineLog {
+    SingBox,
+    XrayA,
+    XrayB,
+}
+
+impl EngineLog {
+    /// The file stem the engines write (`sing-box.log`, `xray-a.log`, `xray-b.log`).
+    pub fn stem(self) -> &'static str {
+        match self {
+            EngineLog::SingBox => "sing-box",
+            EngineLog::XrayA => "xray-a",
+            EngineLog::XrayB => "xray-b",
+        }
+    }
 }
 
 /// Versions of the client.
@@ -320,6 +344,8 @@ pub enum Reply {
     Update(ServiceUpdateWire),
     /// To `ServiceLog`: the caller's lines of the service log.
     ServiceLog(ServiceLogWire),
+    /// To `EngineLog`: the engine's lines of the caller's session (none of another user's).
+    EngineLog(ServiceLogWire),
 }
 
 impl Reply {

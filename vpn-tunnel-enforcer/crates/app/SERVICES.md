@@ -44,7 +44,9 @@ working.
 Shutdown (app-main, bounded): `backend.shutdown.cancel()`; `tunnel.shutdown(budget).await`;
 `tokio::time::timeout(.., backend.ops.close())`; `if let Some(c) = backend.clipboard.get() {
 c.shutdown() }`; last, `drop(backend.log.lock().take())` drains the app log (the process exits
-without running destructors of the `Arc<Backend>`).
+without running destructors of the `Arc<Backend>`). The tunnel's own transport (the helper
+service link's reader, the split runtime's forwarder) does not stop on `backend.shutdown`: the
+quit's stop still reaches the service and hears its answer (p-owner-logs O-1).
 
 ## `Backend` fields and who uses them
 | Field | What | Used by (UI trait) |

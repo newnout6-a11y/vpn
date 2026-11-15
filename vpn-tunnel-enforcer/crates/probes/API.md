@@ -125,7 +125,8 @@ impl Geo {
 }
 ```
 geojs + ipinfo.io + ipwho.is in parallel, vote (priority geojs), 6 s read deadline, per-provider 429
-back-off (`Retry-After` honoured, ≤ 1 h), cache 256 entries 5 min (empty results 5 s), non-public IPs
+back-off (`Retry-After` honoured, ≤ 1 h, logged at info), cache 256 entries 1 h (empty results 5 s;
+p-owner-logs O-7), `asn` answers kept 1 h too (failures not kept), non-public IPs
 refused without a request, disabled → zero requests. The app implements `LookupOwner` (generation /
 active id / tunnel session snapshot) and records countries with `Servers::record_country`.
 
@@ -335,7 +336,9 @@ pub fn proxy_listeners(rows: &[ListenerRow], skip_pids: &[u32]) -> Vec<ListenerI
 // routing: is traffic split as configured (echo services through the TUN and mixed-direct-in)
 pub enum RoutingVerdict { Ok, Partial, Leak, TunnelOff, Inconclusive }
 pub struct RoutingInputs { pub tunnel_active: bool, pub direct: Option<Loopback>, pub tun_source: Option<IpAddr>,
-                           pub smart_ru: bool, pub disable_geo_lookup: bool }
+                           pub smart_ru: bool, pub disable_geo_lookup: bool,
+                           pub other_vpn: bool /* another VPN's tunnel carries the default route: a Russian
+                              host leaving by a third address is Ok with `smartOtherVpn`, never Partial (O-6) */ }
 pub async fn routing_test(inputs: RoutingInputs, cancel: CancellationToken) -> AppResult<RoutingResult>;
 pub async fn direct_egress_ip(direct: &Loopback) -> Option<IpAddr>;   // the real ISP IP (IpMonitor::set_real_ip)
 // snapshot: JSON system snapshots under <data root>\snapshots (60 kept, public IPs pseudonymised)

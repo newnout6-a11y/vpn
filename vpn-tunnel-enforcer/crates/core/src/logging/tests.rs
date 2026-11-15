@@ -336,6 +336,24 @@ fn remembers_recent_problems() {
     );
 }
 
+/// Owner logs O-3 (15.11): a check's own verdict line (tagged `event_code`) is written but is
+/// no problem of the app, so the next health check does not report the last one.
+#[test]
+fn a_checks_own_verdict_is_no_problem() {
+    let tmp = TempDir::new("verdicts");
+    let h = Harness::new(tmp.path(), APP_LOG_MAX_BYTES);
+    h.run(|| {
+        tracing::warn!(
+            event_code = "health-check-summary",
+            "health check: items need attention"
+        );
+        tracing::warn!("a real warning");
+    });
+    let recent: Vec<String> = h.shared.recent().into_iter().map(|p| p.msg).collect();
+    assert_eq!(recent, ["a real warning"]);
+    assert_eq!(lines(&tmp).len(), 2, "both are written");
+}
+
 /// §2.9 log viewer: a tail starts at a whole line; a missing file is reported, not an error.
 #[test]
 fn tail_returns_whole_lines() {

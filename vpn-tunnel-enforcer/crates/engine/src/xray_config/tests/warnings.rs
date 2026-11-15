@@ -72,7 +72,9 @@ fn dropped_profile_options() {
 }
 
 /// Stealth fragments only a TCP TLS ClientHello on sing-box: REALITY, Hysteria2 and plain
-/// profiles lose nothing; a provider graph never gets it.
+/// profiles lose nothing; a provider graph never gets it and says nothing either (owner logs O-2,
+/// 15.11: its own fingerprint and tricks are the provider's, REALITY borrows a real site's
+/// handshake; the line came as a toast on every connect).
 #[test]
 fn stealth_mode() {
     let tls_vless = Profile {
@@ -95,7 +97,7 @@ fn stealth_mode() {
         native_xray: Some(super::select::native(1)),
         ..profile(vless())
     };
-    assert_eq!(keys(&native, true), ["engine.xray.warn.stealth"]);
+    assert!(keys(&native, true).is_empty());
     assert!(keys(&native, false).is_empty());
 }
 

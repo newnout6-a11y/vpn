@@ -132,8 +132,20 @@ fn every_emitted_key_exists() {
         (true, Some("1.1.1.1"), Some("2.2.2.2"), false, None),
     ] {
         let p = |s: Option<&str>| s.map(|s| s.parse().unwrap());
-        msgs.push(derive_routing_verdict(t, p(vpn), p(direct), smart, p(ru_ip)).1);
+        msgs.push(derive_routing_verdict(t, p(vpn), p(direct), smart, p(ru_ip), false).1);
     }
+    let other = |s: &str| s.parse().ok();
+    msgs.push(
+        derive_routing_verdict(
+            true,
+            other("1.1.1.1"),
+            other("2.2.2.2"),
+            true,
+            other("3.3.3.3"),
+            true,
+        )
+        .1,
+    );
     use Category::*;
     msgs.extend(
         [

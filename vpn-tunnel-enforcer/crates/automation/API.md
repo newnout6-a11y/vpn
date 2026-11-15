@@ -738,6 +738,10 @@ pub struct PickStatus { pub phase, pub server: Option<String>, pub round: u8,
 impl PickStatus { pub fn headline(&self) -> Option<Msg>; pub fn exposure_line(&self, now: Exposure) -> Option<Msg>; }
 pub fn rank<'a>(servers: &'a [Candidate], net: &Network, skip: impl Fn(&str) -> bool) -> Vec<&'a Candidate>;
 pub fn next_to_warm<'a>(servers: &'a [Candidate], net: &Network, running: &str, now: UnixMs) -> Option<&'a Candidate>;
+pub const WARM_TICK: Duration /* 5 min */; pub const WARM_COUNT: usize /* 3 */; pub const WARM_FRESH: Duration /* 30 min */;
+// The warm-up (owner logs O-5): one check per WARM_TICK at most, only while someone is at the
+// PC (input within 5 min: no check while locked, display off or away), none while the next
+// WARM_COUNT candidates were checked within WARM_FRESH; each behind the handshake budget.
 pub struct Detector;  impl Detector { pub fn push(&mut self, at: Instant, c: Counters) -> Suspicion }
 pub trait PickHost: Send + Sync + 'static {            // the app (RPITIT)
     fn servers(&self) -> Vec<Candidate>;  fn last_used(&self) -> Option<String>;

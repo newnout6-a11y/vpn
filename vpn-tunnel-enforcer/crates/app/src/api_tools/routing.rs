@@ -35,6 +35,7 @@ pub(super) async fn run(shared: &Shared, cancel: CancellationToken) -> AppResult
         tun_source,
         smart_ru: settings.smart_ru_split,
         disable_geo_lookup: settings.disable_geo_lookup,
+        other_vpn: crate::api_maintenance::other_vpn().await,
     };
     let echo = echo_for(&inputs, soft_proxy);
     let opts = RunOpts {

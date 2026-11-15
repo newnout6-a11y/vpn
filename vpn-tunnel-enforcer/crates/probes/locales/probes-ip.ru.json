@@ -123,7 +123,6 @@
           "tunnelOff": "Туннель выключен",
           "missing": "Лог движка недоступен — не проверено",
           "empty": "Лог движка пуст — не проверено",
-          "counts": "proxy-out: {{proxy}}; direct-out: {{direct}}; dns: {{dns}}",
           "clean": "Ошибок нет",
           "errors_one": "{{count}} ошибка",
           "errors_few": "{{count}} ошибки",
