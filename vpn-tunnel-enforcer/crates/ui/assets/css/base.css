@@ -284,7 +284,6 @@ html, body {
 /* base */
 body {
   font-family: Segoe UI Variable Text, Segoe UI Variable, Segoe UI, system-ui, -apple-system, sans-serif;
-    -webkit-app-region: no-drag;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;

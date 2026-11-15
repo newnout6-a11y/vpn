@@ -69,6 +69,9 @@ pub fn title_if_long(text: &str, max: usize) -> Option<String> {
 }
 
 #[cfg(test)]
+mod style_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

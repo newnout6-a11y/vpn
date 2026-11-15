@@ -152,6 +152,8 @@ pub(crate) struct Rebuild {
     theme: Cell<Theme>,
     /// The rebuild under way, until the new window mounts.
     swap: RefCell<Option<Swap>>,
+    /// The window being replaced was asked to show meanwhile ([`Rebuild::want_shown`]).
+    shown: Cell<bool>,
 }
 
 /// A window being replaced and its replacement on the way.
@@ -181,6 +183,7 @@ impl Rebuild {
             lang: Cell::new(options.lang),
             theme: Cell::new(options.theme),
             swap: RefCell::new(None),
+            shown: Cell::new(false),
             contexts,
             options,
         })
@@ -247,9 +250,22 @@ impl Rebuild {
         }
     }
 
+    /// The window being replaced was asked to show (review exitgate-a1): its replacement comes
+    /// up shown and focused instead of as the crash found the old one.
+    pub(crate) fn want_shown(&self) {
+        self.shown.set(true);
+    }
+
+    /// Whether the replacement settling now was asked to show; asked once.
+    pub(crate) fn take_shown(&self) -> bool {
+        self.shown.take()
+    }
+
     /// The replacement of `old` did not mount in time: it is closed, `old` stays. `false` when
     /// `old` was not waiting for one.
     pub(crate) fn abandon(&self, old: &DesktopContext) -> bool {
+        // A show asked meanwhile is answered by `old` itself from now on.
+        self.shown.set(false);
         let swap = self
             .swap
             .borrow_mut()
@@ -291,9 +307,21 @@ pub(crate) fn use_carry(rebuild: &Rc<Rebuild>, mount: Mount) {
 
 /// A rebuilt window once its page has announced itself (dioxus has then given the window the
 /// start's visibility): the old window's visibility, minimised state and focus; the cloak goes
-/// once the page is painted.
-pub(crate) async fn settle(desktop: &DesktopContext, shape: Shape) {
+/// once the page is painted. Shown and focused instead when the user asked for the window
+/// meanwhile (`shown`: the old window was asked; or the bell already showed this one, review
+/// exitgate-b2), so a second launch or a toast click during a rebuild is not lost.
+pub(crate) async fn settle(desktop: &DesktopContext, shape: Shape, shown: bool) {
     let window = &desktop.window;
+    let shape = if shown || window.is_visible() {
+        Shape {
+            visible: true,
+            minimized: false,
+            focused: true,
+            ..shape
+        }
+    } else {
+        shape
+    };
     if !shape.visible {
         // The controller is hidden since the first render (as a start in the tray).
         window.set_visible(false);
@@ -301,6 +329,8 @@ pub(crate) async fn settle(desktop: &DesktopContext, shape: Shape) {
         return;
     }
     window.set_visible(true);
+    // The first render hid the controller when the crash found the window hidden.
+    crate::tray::set_webview_hidden(desktop, false);
     if shape.minimized {
         window.set_minimized(true);
     } else {

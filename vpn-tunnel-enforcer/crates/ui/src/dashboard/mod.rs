@@ -312,9 +312,6 @@ pub fn Dashboard() -> Element {
     rsx! {
         div { class: "c-swiss swiss-skin",
             div { class: "space-y-6",
-                // The old page's own toast container. Toasts live in the shell now (D-18); the
-                // empty box stays first so `space-y-6` still puts 24 px above the first block.
-                div { class: "c-swiss fixed z-[100] flex flex-col gap-2 top-[52px] right-4" }
                 banners::Banners {}
                 facts::FactsStrip {}
                 slab::Slab { servers, local_pings }

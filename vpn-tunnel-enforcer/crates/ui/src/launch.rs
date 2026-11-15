@@ -279,9 +279,9 @@ fn show_webview2_missing(lang: Lang) {
 }
 
 /// The dioxus desktop configuration: a frameless window that keeps the DWM shadow, rounded
-/// corners and resize borders (the 36 px title strip is HTML, `app-region: drag`), painted with
-/// `--paper` and cloaked until the first frame; our index page and the `app` protocol; the
-/// WebView2 folder; no native context menu in release.
+/// corners and resize borders (the 36 px title strip is HTML and starts Windows' move loop),
+/// painted with `--paper` and cloaked until the first frame; our index page and the `app`
+/// protocol; the WebView2 folder; no native context menu in release.
 pub fn desktop_config(options: &LaunchOptions) -> Config {
     window_config(
         options,
@@ -382,8 +382,9 @@ fn use_frame(min_size: (f64, f64), mount: Mount, rebuild: &Rc<Rebuild>) {
             }
         }
     });
+    let rebuild = rebuild.clone();
     use_future(move || {
-        let desktop = desktop.clone();
+        let (desktop, rebuild) = (desktop.clone(), rebuild.clone());
         async move {
             match mount {
                 Mount::First { hidden: true } => {}
@@ -391,7 +392,9 @@ fn use_frame(min_size: (f64, f64), mount: Mount, rebuild: &Rc<Rebuild>) {
                     painted().await;
                     set_cloaked(&desktop.window, false);
                 }
-                Mount::Again { shape, .. } => remount::settle(&desktop, shape).await,
+                Mount::Again { shape, .. } => {
+                    remount::settle(&desktop, shape, rebuild.take_shown()).await;
+                }
             }
         }
     });

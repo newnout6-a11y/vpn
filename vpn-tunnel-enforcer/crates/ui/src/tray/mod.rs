@@ -6,13 +6,16 @@
 //! the window on close (asking first while protection is on) and runs the quit cleanup before
 //! the window goes away. Besides the app's feed it reads the root's Settings and Updates backends
 //! ([`TrayExtras`]): in "Always" the paused menu turns "Always" off, and an offered app version
-//! gets a line that opens the window.
+//! gets a line that opens the window. A [`WindowBell`] among the root's contexts lets any thread
+//! show or hide the window without the VirtualDom (a later launch, a toast click, the installer).
+mod bell;
 mod demo;
 mod host;
 mod icon;
 mod model;
 mod native;
 
+pub use bell::WindowBell;
 pub use demo::{DemoTray, data_uri};
 pub use host::{QuitMode, TrayApi, TrayContext, TrayHost, hide_to_tray, show_window};
 pub(crate) use host::{WindowLost, set_webview_hidden};

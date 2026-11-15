@@ -1,6 +1,10 @@
 ﻿; Texts shown by the installer and the uninstaller (English first: it is the fallback language).
 ; GateFailed is the Electron installer's text verbatim (installer.nsh), so both generations say the same thing.
 
+; The shutdown gate's status line while the running app cleans up and exits (p-exit-gate).
+LangString Closing ${LANG_ENGLISH} "Closing VPN Tunnel Enforcer if it is running…"
+LangString Closing ${LANG_RUSSIAN} "Закрываем VPN Tunnel Enforcer, если он запущен…"
+
 LangString GateFailed ${LANG_ENGLISH} "VPNTE shutdown was not confirmed. Exit the client normally and retry. Installation/removal has stopped; no processes were force-killed."
 LangString GateFailed ${LANG_RUSSIAN} "Завершение VPNTE не подтверждено. Штатно выйдите из клиента и повторите попытку. Установка/удаление остановлены без принудительного завершения процессов."
 

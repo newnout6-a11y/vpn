@@ -16,6 +16,7 @@ use dioxus::prelude::*;
 use tokio::sync::watch;
 use vpnte_base::{AppResult, Msg};
 
+use super::bell::{Ask, use_answer};
 use super::model::{CloseAction, TrayExtras, TrayItemId, TrayModel, TrayState};
 use super::native::{ALWAYS_MENU_ID, NativeReport, NativeTray, SPEED_REFRESH, UPDATE_MENU_ID};
 use crate::helper::{Capability, HelperApi};
@@ -71,8 +72,9 @@ pub fn hide_to_tray(desktop: &DesktopContext) {
 
 /// Hiding the window alone keeps the page "visible" and rendering. With the WebView2 controller
 /// hidden too, rAF stops and the working set drops from ~370 MB to ~57 MB (cookbook §9); the
-/// VirtualDom keeps running, so the tray menu still updates. A start in the tray needs it too:
-/// wry creates the controller visible whatever the window is.
+/// VirtualDom keeps running (dioxus builds every window hidden on Windows, so its interpreter
+/// applies edits at once, never in frames). A start in the tray needs it too: wry creates the
+/// controller visible whatever the window is.
 pub(crate) fn set_webview_hidden(desktop: &DesktopContext, hidden: bool) {
     use dioxus::desktop::wry::{MemoryUsageLevel, WebViewExtWindows};
     let level = if hidden {
@@ -199,6 +201,12 @@ pub fn TrayHost(children: Element) -> Element {
     let model = use_memo(move || TrayModel::build_with(&state.read(), &extras.read(), quitting()));
     let native = use_hook(|| Rc::new(RefCell::new(NativeTray::new(&model.peek(), *LANG.peek()))));
     let report = use_signal(|| native.borrow().as_ref().map(NativeTray::report));
+    // A later launch, a toast click and the installer reach the window through the root's bell,
+    // which needs neither the VirtualDom nor the page.
+    use_answer(|desktop, ask| match ask {
+        Ask::Show => show_window(desktop),
+        Ask::Hide => hide_to_tray(desktop),
+    });
     use_hook({
         let desktop = desktop.clone();
         // The window always hides on close; the close handler below decides what else happens

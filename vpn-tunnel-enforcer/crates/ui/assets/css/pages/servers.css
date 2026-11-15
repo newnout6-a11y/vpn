@@ -123,8 +123,8 @@
 .srv-menu-trigger[aria-expanded='true'] { background: var(--rule); color: var(--ink); }
 .srv-menu-pop {
   position: fixed; inset: auto; top: anchor(bottom); right: anchor(right); min-width: 232px;
-  margin: 4px 0; border: 1px solid var(--rule-strong); background: var(--paper); padding: 0;
-  color: var(--ink); box-shadow: 6px 6px 0 var(--rule); position-try-fallbacks: flip-block;
+  margin: 4px 0; border: 1px solid var(--rule); background: var(--float-paper); padding: 0;
+  color: var(--ink); box-shadow: var(--float-shadow); position-try-fallbacks: flip-block;
 }
 .srv-menu-item { display: flex; min-height: 34px; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--rule); padding: 6px 12px; font-size: 13px; cursor: pointer; }
 .srv-menu-item:first-child { border-top: 0; }
@@ -205,7 +205,7 @@
   padding: 6px 4px; font-size: 11px; text-align: left; color: var(--ink);
 }
 .srv-history-item:first-child { border-top: 0; }
-.srv-history-item:hover { background: color-mix(in srgb, var(--rule) 50%, transparent); }
+.srv-history-item:hover:not(.is-selected) { background: color-mix(in srgb, var(--rule) 50%, transparent); }
 .srv-history-item.is-selected { box-shadow: inset 3px 0 0 var(--signal); background: color-mix(in srgb, var(--rule) 60%, transparent); }
 .srv-history-item:focus-visible { outline: 2px solid var(--signal); outline-offset: -2px; }
 .srv-history-stamp { min-width: 13ch; }

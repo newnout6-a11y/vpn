@@ -1,5 +1,5 @@
 /* ui-wizard: the first-run wizard overlay in «Пломба» (prefix wz-). It covers everything below the
- * 36 px title strip, which stays a drag region; the caption buttons (z-index 1001) stay above it.
+ * 36 px title strip, which still moves the window; the caption buttons (z-index 1001) stay above it.
  * z-index 95: above the pages and the strip (90), below the toasts (100) and the shutdown overlay
  * (1000). Only swiss.css tokens, square corners, hairlines, mono captions. */
 .wz-root {

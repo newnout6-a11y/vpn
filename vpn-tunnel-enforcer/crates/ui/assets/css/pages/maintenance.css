@@ -4,7 +4,7 @@
  * the progress bar and dialogs are the shared widgets; selectors here are prefixed mt-. */
 
 /* ── Page ─────────────────────────────────────────────────────────────────── */
-.mt-page { display: flex; min-height: 100%; max-width: 960px; flex-direction: column; gap: 20px; padding-bottom: 24px; color: var(--ink); }
+.mt-page { display: flex; max-width: 960px; flex-direction: column; gap: 20px; padding-bottom: 24px; color: var(--ink); }
 .mt-page > .w-section-head { margin-bottom: 0; }
 .mt-sections { display: flex; flex-direction: column; gap: 16px; }
 .mt-sections > .w-panel { scroll-margin-top: 16px; }

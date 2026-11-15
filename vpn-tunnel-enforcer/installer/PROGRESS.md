@@ -434,3 +434,21 @@ A listener on a non-loopback address makes Windows Firewall ask for administrato
 - Tests (xtask `nsis_webview2`): the shipped defines and order; six real runs of the branch compiled with the pinned
   NSIS against a throw-away HKCU key with stand-ins (reg.exe, a missing exe).
 - Not run here: the real bootstrapper (this PC has the runtime; a run would change real state) -> the sandbox lab.
+
+# Work package `p-exit-gate` — the shutdown gate says what it waits for (2026-11-15)
+
+Owner, 15.11: the installer «просто встал» at «Извлечение: vpnte-setup.exe… 100%» while the running app waited
+83 s (its window was hidden in the tray). Two halves:
+- The app (`crates/app/src/root/commands.rs`): `shutdown-for-update` is served on the backend's runtime, never by
+  the window's VirtualDom: the window hides as a courtesy, the bounded cleanup runs (tunnel 12 s, operations 3 s,
+  20 s in all), exit 73. A hidden or minimised window no longer holds the VirtualDom either (`crates/ui/src/launch/
+  pace.rs`).
+- The installer (`vpnte.nsi` macro `Gate`, install and uninstall alike): `DetailPrint "$(Closing)"` before the
+  helper's `await-shutdown` — status line «Закрываем VPN Tunnel Enforcer…» / "Closing VPN Tunnel Enforcer…"
+  (`lang.nsh`); the file lines follow. Still no force-kill; refusals unchanged (`GateFailed` + the helper's line).
+- Not done, on purpose: a finer line from the helper ("still disconnecting"). nsExec shows a running helper's output
+  only in the hidden details list, never on the status line, and the cleanup is bounded at 20 s; the one line says
+  what setup waits for.
+- Checked here: the `Gate` macro with `lang.nsh` compiled by the pinned makensis 3.13 in a scratch script (installer
+  and uninstaller sections, no warnings); the shipped script is compiled by CI (`cargo xtask dist`). Test
+  `setup::tests::the_installer_says_what_its_gate_waits_for` keeps the line before the wait, in both languages.

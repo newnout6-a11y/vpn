@@ -1,8 +1,11 @@
 //! The application (work package `app-main`): [`run`] wires the backend into the Dioxus shell
 //! (bootstrap order of lifecycle-app §3.12 / §6.5 and `SERVICES.md`), and [`App`] is the root
 //! component: tray, shell with the pages of this build, first-run wizard, toasts fed by the
-//! backend's notices, commands of later launches and toast clicks. A WebView2 crash rebuilds the
-//! window with a new [`App`] over the same contexts ([`wiring`] keeps what must carry over).
+//! backend's notices. Commands of later launches and toast clicks never wait for it: they run on
+//! the backend's runtime ([`commands`]) and reach the window through its bell. A WebView2 crash
+//! rebuilds the window with a new [`App`] over the same contexts ([`wiring`] keeps what must carry
+//! over).
+mod commands;
 mod wiring;
 
 use std::any::Any;
@@ -11,7 +14,6 @@ use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use dioxus::desktop::{DesktopContext, use_window};
 use dioxus::prelude::*;
 use tokio::sync::mpsc;
 use vpnte_base::types::{Level, Notice};
@@ -21,7 +23,7 @@ use vpnte_ui::launch::{LaunchOptions, RootContext};
 use vpnte_ui::pages::{Page, PageRegistry, use_nav};
 use vpnte_ui::shell::Shell;
 use vpnte_ui::t;
-use vpnte_ui::tray::{QuitMode, TrayApi, TrayHost, hide_to_tray, show_window};
+use vpnte_ui::tray::{TrayApi, TrayHost, WindowBell};
 use vpnte_ui::widgets::{ToastHost, ToastKind, Toasts};
 use vpnte_winnet::single_instance::Command;
 
@@ -34,8 +36,8 @@ use crate::{
 };
 
 /// The whole application. Returns only on the paths that end without a window (installer
-/// helpers, a second launch, a failed start); otherwise the UI ends the process: `0` after the
-/// tray's quit cleanup, `73` after the installer's `--shutdown-for-update`.
+/// helpers, a second launch, a failed start); otherwise the process ends from inside: `0` after
+/// the tray's quit cleanup, `73` after the installer's `--shutdown-for-update` ([`commands`]).
 pub fn run(args: &Args) -> ExitCode {
     if let Some(code) = crate::setup::run(args) {
         return code;
@@ -70,10 +72,15 @@ pub fn run(args: &Args) -> ExitCode {
     // end-session rollback.
     crate::restore::at_start(backend.dirs.root.clone());
     let options = launch_options(&backend, args);
-    let wiring = Wiring::new(backend, primary.take_commands());
-    // The link this start was opened with (`--open-link`) goes to the add dialog like a later one.
-    wiring.inbox.set_first_link(args.open_link.clone());
-    vpnte_ui::launch::launch(options, App, move || contexts(wiring))
+    let bell = WindowBell::default();
+    let wiring = Wiring::new(backend, &bell);
+    let start = Start {
+        commands: primary.take_commands(),
+        // The link this start was opened with (`--open-link`) goes to the add dialog like a later one.
+        first_link: args.open_link.clone(),
+        bell,
+    };
+    vpnte_ui::launch::launch(options, App, move || contexts(wiring, start))
 }
 
 /// What [`App`] takes over from [`run`] (one root context, the same for a rebuilt window).
@@ -83,25 +90,34 @@ struct Wiring {
 }
 
 impl Wiring {
-    fn new(backend: Arc<Backend>, commands: Option<mpsc::UnboundedReceiver<Command>>) -> Self {
-        let (tx, clicks) = mpsc::unbounded_channel();
-        // The notifier calls this on its toast thread: hand the click to the UI thread.
-        backend.notifier.set_on_activate(Arc::new(move || {
-            let _ = tx.send(());
-        }));
+    fn new(backend: Arc<Backend>, bell: &WindowBell) -> Self {
+        // The notifier calls this on its toast thread; the bell shows the window from there.
+        let bell = bell.clone();
+        backend
+            .notifier
+            .set_on_activate(Arc::new(move || bell.show()));
         // Subscribed before the window exists: notices of the tunnel's start-up recovery wait.
         let notices = backend.notifier.subscribe();
         Wiring {
-            inbox: Rc::new(wiring::Inbox::new(commands, clicks, notices)),
+            inbox: Rc::new(wiring::Inbox::new(notices)),
             backend,
         }
     }
 }
 
+/// What the backend's side of the root takes over from [`run`]: later launches' commands, the
+/// start's link and the window's bell (also a root context: the tray host answers it).
+struct Start {
+    commands: Option<mpsc::UnboundedReceiver<Command>>,
+    first_link: Option<String>,
+    bell: WindowBell,
+}
+
 /// The root contexts, built once inside the UI's tokio runtime: the tunnel first (every API reads
-/// it), the background tasks this package owns, then the contexts of every `api_*` module and
-/// the root's own wiring. A rebuilt window gets clones of the same contexts.
-fn contexts(wiring: Wiring) -> Vec<Box<dyn RootContext>> {
+/// it), the background tasks this package owns, then the contexts of every `api_*` module, the
+/// commands of later launches (served from here on) and the root's own wiring and bell. A rebuilt
+/// window gets clones of the same contexts.
+fn contexts(wiring: Wiring, start: Start) -> Vec<Box<dyn RootContext>> {
     let backend = wiring.backend.clone();
     // Before the first connect: last-known server addresses and resolver winners (RU item 10),
     // the current network's winner already asked first.
@@ -140,8 +156,19 @@ fn contexts(wiring: Wiring) -> Vec<Box<dyn RootContext>> {
     out.extend(api_tools::contexts(&backend));
     out.extend(api_lists::contexts(&backend, &built));
     out.extend(crate::svc_update::contexts(&backend));
+    let links = out
+        .iter()
+        .find_map(|context| context.downcast_ref::<api_servers::LinkInbox>())
+        .cloned();
+    let effects = commands::Live {
+        bell: start.bell.clone(),
+        links,
+        backend,
+    };
+    commands::spawn(start.commands, start.first_link, Arc::new(effects));
     let mut out: Vec<Box<dyn RootContext>> = out.into_iter().map(reusable).collect();
     out.push(Box::new(Rc::new(wiring)));
+    out.push(Box::new(start.bell));
     out
 }
 
@@ -235,8 +262,6 @@ pub fn App() -> Element {
     // The page shown before a WebView2 crash, else the start page.
     let start = use_hook(|| wiring.inbox.page());
     use_notices(&wiring, toasts);
-    use_instance_commands(&wiring);
-    use_toast_clicks(&wiring);
     vpnte_ui::webview_errors::use_script_errors();
     rsx! {
         TrayHost {
@@ -331,61 +356,6 @@ fn show_notice(toasts: Toasts, notice: &Notice) {
         tr_now(&notice.title),
         notice.body.as_ref().map(tr_now),
     );
-}
-
-/// Commands of later launches: `activate` shows the window; a link (and the one this process
-/// started with) shows the window and goes to the Servers page's add dialog, where the user
-/// confirms it; the installer's `shutdown-for-update` runs the quit cleanup without a question
-/// and exits with 73.
-fn use_instance_commands(wiring: &Rc<Wiring>) {
-    let tray = use_context::<Rc<dyn TrayApi>>();
-    let links = use_context::<crate::api_servers::LinkInbox>();
-    let desktop = use_window();
-    use_future({
-        let (inbox, links) = (wiring.inbox.clone(), links.clone());
-        move || {
-            let link = inbox.take_first_link();
-            let links = links.clone();
-            async move {
-                if let Some(link) = link {
-                    links.offer(link);
-                }
-            }
-        }
-    });
-    let mut updating = false;
-    wiring::use_commands(&wiring.inbox, move |command| match command {
-        Command::Activate => show_window(&desktop),
-        Command::OpenLink(link) => {
-            show_window(&desktop);
-            links.offer(link);
-        }
-        Command::ShutdownForUpdate if !updating => {
-            updating = true;
-            // Outlives any component: the exit must happen whatever the UI does.
-            dioxus::core::spawn_forever(shutdown_for_update(tray.clone(), desktop.clone()));
-        }
-        Command::ShutdownForUpdate => {}
-    });
-}
-
-/// The installer's request (lifecycle-app §3.13): nothing is asked, the bounded cleanup runs
-/// (a failed Soft rollback does not stop it; the journal finishes it at the next start), and the
-/// process acknowledges with 73. A user's quit already under way may end first with 0, which
-/// the installer reads as "not acknowledged" (as the old app did).
-async fn shutdown_for_update(tray: Rc<dyn TrayApi>, desktop: DesktopContext) {
-    tracing::info!("installer asked for shutdown");
-    hide_to_tray(&desktop);
-    if let Err(err) = tray.quit(QuitMode::SkipRestore).await {
-        tracing::warn!(error = %err, "update shutdown: cleanup incomplete");
-    }
-    boot::exit(boot::EXIT_UPDATE_ACK);
-}
-
-/// A click on a Windows toast shows the window.
-fn use_toast_clicks(wiring: &Rc<Wiring>) {
-    let desktop = use_window();
-    wiring::use_clicks(&wiring.inbox, move || show_window(&desktop));
 }
 
 #[cfg(test)]

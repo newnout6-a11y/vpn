@@ -86,6 +86,11 @@ the window background in sync with `lang::LANG` / `theme::THEME` / the OS theme.
 (as hiding to the tray does; wry creates the controller visible whatever the window is), so a start
 in the tray never renders the page; `tray::show_window` restores both.
 
+A hidden or minimised window keeps its VirtualDom running: dioxus-desktop 0.7.10 builds every window
+hidden on Windows, so its interpreter applies and acknowledges edit batches at once, never in animation
+frames. A later launch, a toast click and the installer's shutdown do not depend on it anyway: they
+reach the window through the root's `tray::WindowBell` (p-exit-gate).
+
 When the page's renderer or the WebView2 browser process dies (`ProcessFailed`), the window is
 rebuilt (p-webview-recover): a new window with a new VirtualDom over the same root contexts (each
 VirtualDom gets a clone of every context: `RootContext`, so build the backend once in the closure
@@ -252,6 +257,12 @@ pub fn nav_number(index: usize) -> String;       // 0 -> "01"
 ```
 A page root is a prop-less `fn() -> Element` and fills the page area (`div.c-swiss.swiss-skin`).
 Navigate with `use_nav().go(Page::Servers)`. Hidden pages get `display:none` + `aria-hidden`.
+The page area (`div.c-swiss.shell-pages`) is paper; its `<main>` pads 20 px on top (the sidebar's
+line, so every page's first block starts there) and 24 px elsewhere, and `.swiss-skin` fills exactly
+that. The title strip moves the window with a primary press through Windows' own move loop (tao
+`drag_window`: Aero Snap, drag out of maximised); a second press within 500 ms and 4 px maximises or
+restores, as on a native caption. No stylesheet declares `app-region` (p-ux-frame, 15.11.2026: in the
+installed build WebView2's drag region did not move the window, and it would swallow the press).
 
 ## Widgets: `widgets` (shared controls of every page)
 
@@ -270,7 +281,8 @@ impl Toasts { fn use_provider() -> Self /*app root, once*/; fn use_context() -> 
     fn list(&self) -> Vec<Toast> /*oldest first, subscribes*/;
     fn failed(&self, title: &Msg, err: &AppError); }   // an action's failure: silent when Cancelled, else a
                                                     // warn log + error toast `title` / `err.user_msg()`
-#[component] pub fn ToastHost(close_label: String) -> Element;      // into Shell { toasts }
+#[component] pub fn ToastHost(close_label: String) -> Element;      // into Shell { toasts }; top right on
+                                                 // the page grid (56 px from the top, 24 px from the right)
 pub const TOAST_TTL: Duration /*4 s*/; pub const TOAST_LIMIT: usize /*20*/;
 
 pub struct UiError { pub kind: ErrorKind, pub msg: Msg }          // From<&AppError>
@@ -284,7 +296,12 @@ pub fn use_load<T, F>(fetch: impl FnMut() -> F) -> Loader<T>;     // state(), re
 scope and its token is cancelled when the owner unmounts; a cancelled run is silent. `Modal` /
 `ConfirmDialog` are native modal `<dialog>`s (page behind inert, focus trap, Escape wherever the focus
 is, focus returns to the opener); only a press that starts and ends on the backdrop closes them, and
-`can_close: false` (a busy `ConfirmDialog`) also stops the browser's own close request. `NumberInput`
+`can_close: false` (a busy `ConfirmDialog`) also stops the browser's own close request.
+Floating surfaces (dialogs, the select list, menus, toasts, the settings save bar) take one quiet
+treatment from swiss.css: the hairline `1px solid var(--rule)`, `--float-paper`, `--float-shadow`
+(light: a soft small shadow; dark: one surface step, no shadow); no hard offset shadows. A hover never
+changes the colours of a selected / pressed / current item (`:not(.is-on)` and the like);
+`widgets/style_tests.rs` checks both over every stylesheet. `NumberInput`
 commits on blur / Enter (`commit_number` clamps), arrows step from the typed text.
 
 ## Start page: `dashboard`, `panels`, `mascot`
@@ -438,7 +455,8 @@ pub enum CloseAction { Hide, Quit }                              // TrayState::c
 #[component] pub fn TrayHost(children: Element) -> Element;      // wraps the Shell; provides TrayContext
 #[derive(Clone, Copy)] pub struct TrayContext { pub model: Memo<TrayModel>, pub native: Signal<Option<NativeReport>> }
 pub fn show_window(desktop: &DesktopContext);   // tray click, «Показать окно», a second launch (pipe `activate`)
-pub fn hide_to_tray(desktop: &DesktopContext);  // hides window + WebView2 controller (memory drops, rAF stops)
+pub fn hide_to_tray(desktop: &DesktopContext);  // hides window + WebView2 controller (memory drops, rAF stops; edits applied at once)
+#[derive(Clone, Default)] pub struct WindowBell;   // Send + Sync: show() / hide() from any thread
 pub fn format_speed(bytes_per_second: u64) -> String;   // 0 -> "0 Kbps", 125 000 -> "1.0 Mbps"
 pub struct DemoTray;                            // new(scene), scene(TrayStatus) -> TrayState, update(..), spawn_traffic()
 ```
@@ -455,6 +473,11 @@ p-tails-a: while the window is lost after a WebView2 crash (the rebuild limit of
 or a new window that did not mount within 30 s) the Show entry reads «Открыть окно» (same id
 `tray.show`); either label opens a new window: the crash watch takes the click itself (shows the
 lost window, then rebuilds at once), and a new window starts with the flag unset.
+p-exit-gate: a `WindowBell` among the root's contexts lets any thread show or hide the window
+without the VirtualDom (a later launch's `activate` or link, a toast click, the installer's
+shutdown): it posts a registered message to the window, whose subclass (installed by `TrayHost`)
+answers on the UI thread inside `DispatchMessage`, also while the page is dead or the VirtualDom
+waits. An ask rung before the window answers waits for it; a newer ask replaces one not carried out.
 
 ## First-run wizard: `wizard`
 

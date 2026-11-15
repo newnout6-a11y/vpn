@@ -2,7 +2,7 @@
  * (--paper --ink --mute --rule --rule-strong --signal --on-signal --signal-ink), square corners,
  * hairlines, mono captions. Panels, tables, badges and buttons are the shared widgets. */
 
-.lg { display: flex; min-height: 100%; flex-direction: column; gap: 20px; padding-bottom: 24px; color: var(--ink); }
+.lg { display: flex; flex-direction: column; gap: 20px; padding-bottom: 24px; color: var(--ink); }
 .lg > .w-section-head { margin-bottom: 0; }
 .lg .w-panel-head .w-seg-item { height: 26px; padding: 0 10px; font-size: 12px; }
 .lg-count { font-size: 11px; color: var(--mute); white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -34,7 +34,7 @@
   background: transparent;
   transition: color 0.15s, background-color 0.15s, border-color 0.15s;
 }
-.lg-chip:hover { border-color: var(--signal); }
+.lg-chip:hover:not([aria-pressed='true']) { border-color: var(--signal); }
 .lg-chip[aria-pressed='true'] { border-color: var(--ink); background: var(--ink); color: var(--paper); }
 .lg-chip:focus-visible, .lg-expand:focus-visible, .lg-fold:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; border-radius: 0; }
 .lg-dates { display: flex; flex-wrap: wrap; gap: 12px; }

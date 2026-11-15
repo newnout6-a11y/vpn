@@ -1,6 +1,6 @@
 //! Toasts: one app-wide queue ([`Toasts`], in context) rendered once by [`ToastHost`] in the
 //! shell: square paper cards with a state bar (ui-dashboard §2.9), newest at the bottom, at most
-//! [`TOAST_LIMIT`], each gone after [`TOAST_TTL`] or on its close button.
+//! [`TOAST_LIMIT`], each gone after [`TOAST_TTL`] in view or on its close button.
 use std::time::Duration;
 
 use dioxus::prelude::*;
@@ -63,6 +63,9 @@ pub struct Toast {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Toasts {
     list: Signal<Vec<Toast>>,
+    /// The window is in view ([`Toasts::set_seen`]). Out of view nothing expires: a notice
+    /// that came while the window sat in the tray waits for the user (review exitgate-b3).
+    seen: Signal<bool>,
 }
 
 impl Toasts {
@@ -71,11 +74,13 @@ impl Toasts {
     pub fn use_provider() -> Self {
         let toasts = use_context_provider(|| Toasts {
             list: Signal::new(Vec::new()),
+            seen: Signal::new(true),
         });
-        let mut list = toasts.list;
-        // Re-armed whenever the list changes; sleeps until the earliest expiry.
+        let (mut list, seen) = (toasts.list, toasts.seen);
+        // Re-armed whenever the list or the window's view changes; sleeps until the earliest
+        // expiry, and not at all while the window is out of view.
         let _expiry = use_resource(move || {
-            let next = next_expiry(&list.read());
+            let next = due(&list.read(), *seen.read());
             async move {
                 if let Some(at) = next {
                     tokio::time::sleep_until(at).await;
@@ -136,6 +141,20 @@ impl Toasts {
         self.error(tr_now(title), Some(tr_now(&err.user_msg())));
     }
 
+    /// The window came into view or left it (the shell tells). Back in view, every toast gets
+    /// its full [`TOAST_TTL`] from now: the user has not seen it yet.
+    pub fn set_seen(&self, in_view: bool) {
+        let mut seen = self.seen;
+        if *seen.peek() == in_view {
+            return;
+        }
+        if in_view {
+            let mut list = self.list;
+            renew(&mut list.write(), Instant::now());
+        }
+        seen.set(in_view);
+    }
+
     /// Removes a toast (its close button).
     pub fn dismiss(&self, id: u64) {
         let mut list = self.list;
@@ -158,6 +177,19 @@ fn push_limited(list: &mut Vec<Toast>, toast: Toast) {
 
 fn next_expiry(list: &[Toast]) -> Option<Instant> {
     list.iter().map(|t| t.expires_at).min()
+}
+
+/// When the next toast goes: never while the window is out of view.
+fn due(list: &[Toast], seen: bool) -> Option<Instant> {
+    seen.then(|| next_expiry(list)).flatten()
+}
+
+/// Every toast stays at least a full [`TOAST_TTL`] from `now`.
+fn renew(list: &mut [Toast], now: Instant) {
+    let fresh = now + TOAST_TTL;
+    for toast in list {
+        toast.expires_at = toast.expires_at.max(fresh);
+    }
 }
 
 /// The toast stack (top right, below the 36 px title strip). Rendered once, by the shell.
@@ -205,6 +237,20 @@ mod tests {
             description: None,
             expires_at: Instant::now() + Duration::from_millis(after_ms),
         }
+    }
+
+    /// Review exitgate-b3: out of view nothing is due; back in view a toast whose time ran out
+    /// while hidden, and one with time left, both get a full TTL from then.
+    #[test]
+    fn toasts_wait_while_the_window_is_out_of_view() {
+        let mut list = vec![toast(1, 0), toast(2, 6000)];
+        assert_eq!(due(&list, false), None);
+        assert_eq!(due(&list, true), Some(list[0].expires_at));
+        let later = Instant::now() + Duration::from_secs(60);
+        let kept = list[1].expires_at;
+        renew(&mut list, later);
+        assert_eq!(list[0].expires_at, later + TOAST_TTL);
+        assert_eq!(list[1].expires_at, kept.max(later + TOAST_TTL));
     }
 
     /// At most 20 kept, the oldest dropped first (R/store.ts:461-481).

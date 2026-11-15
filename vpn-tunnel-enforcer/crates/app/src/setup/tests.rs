@@ -142,3 +142,36 @@ fn the_logon_value_waits_for_a_complete_rollback() {
     let git_left = step(Outcome::Failed("git proxy not restored".into()));
     assert!(!logon_value_goes(&git_left));
 }
+
+/// p-exit-gate (owner, 15.11: setup «просто встал» under its last extraction line): the shutdown
+/// gate puts «Закрываем VPN Tunnel Enforcer…» on the status line before it waits, in both
+/// languages, at install and uninstall alike (one macro), and it only ever asks the client.
+#[test]
+fn the_installer_says_what_its_gate_waits_for() {
+    let read = |name: &str| {
+        let path = format!("{}/../../installer/{name}", env!("CARGO_MANIFEST_DIR"));
+        std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path}: {err}"))
+    };
+    let nsi = read("vpnte.nsi");
+    let gate = &nsi[nsi.find("\n!macro Gate").expect("the gate macro")..];
+    let gate = &gate[..gate.find("!macroend").unwrap()];
+    let shown = gate
+        .find(r#"DetailPrint "$(Closing)""#)
+        .expect("status line");
+    let waits = gate.find("--setup await-shutdown").expect("the helper");
+    assert!(shown < waits);
+    assert!(!gate.to_ascii_lowercase().contains("kill"));
+    assert_eq!(
+        nsi.matches("!insertmacro Gate").count(),
+        2,
+        "install and uninstall"
+    );
+    let lang = read("lang.nsh");
+    // True on a first install too, where nothing runs (review exitgate-b4).
+    assert!(lang.contains(
+        r#"LangString Closing ${LANG_ENGLISH} "Closing VPN Tunnel Enforcer if it is running…""#
+    ));
+    assert!(lang.contains(
+        r#"LangString Closing ${LANG_RUSSIAN} "Закрываем VPN Tunnel Enforcer, если он запущен…""#
+    ));
+}

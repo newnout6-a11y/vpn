@@ -437,10 +437,17 @@ impl CrashWatch {
     /// The window was focused, which a lost (hidden) window only is when something shows it: a
     /// new window replaces it now, in the state it is shown in.
     fn on_shown(self: &Rc<Self>) {
-        if self.phase.get() == State::Lost {
-            tracing::info!("window opened again after a WebView2 crash");
-            self.shape.set(Some(Shape::of(&self.desktop.window)));
-            self.replace();
+        match self.phase.get() {
+            State::Lost => {
+                tracing::info!("window opened again after a WebView2 crash");
+                self.shape.set(Some(Shape::of(&self.desktop.window)));
+                self.replace();
+            }
+            // A second launch or a toast click showed this window while its replacement is on
+            // its way: the replacement comes up shown, not as the crash found this one (review
+            // exitgate-a1).
+            State::Waiting | State::Replaced => self.rebuild.want_shown(),
+            _ => {}
         }
     }
 

@@ -30,6 +30,11 @@
   --signal: #ff4f00;
   --on-signal: #26241f;
   --on-rule: rgba(38, 36, 31, 0.22);
+  /* Surfaces that float above the page (dialogs, menus, toasts, the save bar): the hairline plus
+     a soft, small, neutral shadow. The old hard offset shadows read as rendering stripes
+     (15.11.2026), so every floating surface takes these two and nothing else. */
+  --float-paper: var(--paper);
+  --float-shadow: 0 1px 2px rgba(38, 36, 31, 0.06), 0 4px 16px rgba(38, 36, 31, 0.08);
   font-family: 'Inter Tight', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -44,6 +49,9 @@
   --signal: #ff5a1f;
   --on-signal: #1c1b18;
   --on-rule: rgba(28, 27, 24, 0.28);
+  /* a shadow does not read on graphite: one surface step up instead */
+  --float-paper: color-mix(in srgb, var(--paper) 95%, var(--ink));
+  --float-shadow: none;
 }
 .c-swiss .swiss-mono,
 .swiss-mono {
@@ -323,10 +331,10 @@
   --shadow-button-hover: none;
   --glass-bg: rgb(var(--rgb-card));
   --glass-border: rgb(var(--rgb-border));
-  /* Fill the page area (the page container has p-6) with paper */
-  margin: -24px;
-  padding: 24px;
-  min-height: calc(100% + 48px);
+  /* Fill the page area with paper (shell.css pads it 20 px on top, 24 px on the sides and below) */
+  margin: -20px -24px -24px;
+  padding: 20px 24px 24px;
+  min-height: calc(100% + 44px);
   background: var(--paper);
   color: var(--ink);
 }
@@ -554,7 +562,7 @@
   padding: 7px 20px;
   font-size: 12px;
 }
-.swiss-server-row:hover { background: var(--rule); }
+.swiss-server-row:hover:not(.is-selected) { background: var(--rule); }
 .swiss-server-row.is-selected { background: var(--ink); color: var(--paper); }
 .swiss-server-row.is-offline { color: var(--mute); }
 .swiss-server-flag { display: flex; align-items: center; }
@@ -565,15 +573,14 @@
 .swiss-health-dot { width: 8px; height: 8px; background: currentColor; }
 .swiss-health-dot.is-offline { background: var(--signal); }
 .swiss-health-dot.is-unknown { background: transparent; border: 1px solid currentColor; }
-/* ── Title bar (TitleBar.tsx): drag strip under the native caption buttons ── */
+/* ── Title bar (TitleBar.tsx): the window's caption strip. A press moves the window through
+   Windows' own move loop (shell.rs), not CSS app-region, which WebView2 did not honour. ── */
 .swiss-titlebar {
   position: fixed;
   inset: 0 0 auto 0;
   z-index: 90;
   height: 36px;
   background: var(--paper);
-  -webkit-app-region: drag;
-  app-region: drag;
 }
 /* ── Toasts (MacToast): square paper cards, a 4px state bar on the left ── */
 .swiss-toast {
@@ -582,11 +589,11 @@
   width: 360px;
   align-items: flex-start;
   gap: 12px;
-  border: 1px solid var(--rule-strong);
-  background: var(--paper);
+  border: 1px solid var(--rule);
+  background: var(--float-paper);
   padding: 14px 12px 14px 20px;
   color: var(--ink);
-  box-shadow: 6px 6px 0 var(--rule);
+  box-shadow: var(--float-shadow);
 }
 .swiss-toast::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--ink); }
 .swiss-toast.is-error::before,

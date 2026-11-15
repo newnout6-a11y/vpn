@@ -102,8 +102,10 @@ Var Fresh          ; 1 = no per-user installation existed before this run (the f
 
 ; Shutdown gate: the helper asks the installed client to exit and waits for its acknowledgement (exit code
 ; 73 of the bound primary process). It never force-kills the client; a refusal stops setup. `!=` is a string
-; comparison, so nsExec's "error" / "timeout" results refuse as well.
+; comparison, so nsExec's "error" / "timeout" results refuse as well. The status line says what setup waits
+; for (owner, 15.11: a silent wait under the last extraction line looked like a hang); the file lines follow.
 !macro Gate
+  DetailPrint "$(Closing)"
   nsExec::ExecToStack /TIMEOUT=150000 '"${HELPER}" --setup await-shutdown --install-dir "$INSTDIR"'
   Pop $0
   Pop $1
