@@ -5,8 +5,11 @@ use std::collections::{HashMap, HashSet};
 
 use dioxus::core::{ScopeId, Task};
 use dioxus::prelude::*;
+use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{ClientDevice, UnixMs, now_ms};
 
+use super::check::{Totals, row_tags, totals};
+use super::check_model::{CheckKey, CheckStage};
 use super::model::{
     AddTarget, ExportReport, ImportReport, KeyHealth, ServerView, ServersView, SubscriptionRequest,
 };
@@ -18,15 +21,63 @@ use crate::widgets::UiError;
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct RowRt {
     pub ping: PingState,
-    /// This session's health verdict (newer than the persisted one).
+    /// This session's health verdict (newer than the persisted one), and the tag of the key it
+    /// is about: shown only while the row holds that key (b2).
     pub health: Option<KeyHealth>,
+    pub health_tag: u64,
     pub verifying: bool,
     pub starting_proxy: bool,
     pub exporting: bool,
     pub restoring: bool,
-    /// The running check waits for this server name's handshake budget (lab live-9 L9-7):
-    /// said on the row instead of a silent minute; its result or the run's end clears it.
-    pub budget_wait: bool,
+    /// Where the row's key is in the last key check that took it (p-check-live): said on the
+    /// row in numbers as it happens, kept after the run until the next check of the row.
+    pub check: Option<RowCheck>,
+}
+
+/// Which key check a row's stage belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum RunKey {
+    /// «Проверить работу» over the whole list.
+    List,
+    /// A group's «Проверить».
+    Group(String),
+}
+
+/// A row's stage in a key check, and the tag of the key it is about (shown and counted only
+/// while the row holds that key, b2).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RowCheck {
+    pub run: RunKey,
+    pub tag: u64,
+    pub stage: CheckStage,
+}
+
+/// A key check of the page that told its first stage, running or over.
+#[derive(Debug, Clone)]
+pub(crate) struct CheckRun {
+    /// «Отменить» cancels it: the backend answers what landed.
+    pub stop: CancellationToken,
+    pub state: RunState,
+    /// Its numbers as they were when it ended: a later check takes its rows' lines, and an
+    /// ended strip never changes after (a1).
+    pub totals: Option<Totals>,
+}
+
+/// Where a key check is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunState {
+    Running,
+    /// «Отменить» was pressed; the answer with what landed is on its way.
+    Stopping,
+    Ended {
+        stopped: bool,
+    },
+}
+
+impl RunState {
+    pub fn running(self) -> bool {
+        !matches!(self, RunState::Ended { .. })
+    }
 }
 
 impl RowRt {
@@ -46,7 +97,8 @@ pub(crate) fn effective_health<'a>(
     row: Option<&'a RowRt>,
     server: &'a ServerView,
 ) -> Option<&'a KeyHealth> {
-    row.and_then(|r| r.health.as_ref())
+    row.filter(|r| r.health_tag == server.key_tag)
+        .and_then(|r| r.health.as_ref())
         .or(server.health.as_ref())
 }
 
@@ -54,7 +106,6 @@ pub(crate) fn effective_health<'a>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct GroupBusy {
     pub refresh: bool,
-    pub health: bool,
     pub proxies: bool,
     pub policy: bool,
 }
@@ -189,10 +240,15 @@ pub(crate) struct Store {
     /// The running ping-all (a second click cancels it) and the row states it replaced.
     pub ping_task: Signal<Option<Task>>,
     pub ping_before: Signal<Vec<(String, PingState)>>,
-    /// The running list-wide check through each server (a second click stops it).
-    pub check_task: Signal<Option<Task>>,
-    /// Results of the running (or last) list-wide check so far.
-    pub check_done: Signal<u32>,
+    /// The key checks of this page (the list-wide one and the groups') that told a stage,
+    /// running or over: their strips.
+    pub checks: Signal<HashMap<RunKey, CheckRun>>,
+    /// A check started whose first stage has not come yet: no strip until it does, and a start
+    /// refused before any stage leaves the previous strip and lines as they were (a4).
+    pub launching: Signal<Option<(RunKey, CancellationToken)>>,
+    /// Re-renders the countdowns every second while a check runs and when the page is shown
+    /// again; they read the clock themselves (a2).
+    pub tick: Signal<UnixMs>,
 }
 
 impl Store {
@@ -220,8 +276,9 @@ impl Store {
             bulk: Signal::new(None),
             ping_task: Signal::new(None),
             ping_before: Signal::new(Vec::new()),
-            check_task: Signal::new(None),
-            check_done: Signal::new(0),
+            checks: Signal::new(HashMap::new()),
+            launching: Signal::new(None),
+            tick: Signal::new(now_ms()),
         }
     }
 
@@ -231,22 +288,126 @@ impl Store {
         f(rows.write().entry(id.to_owned()).or_default());
     }
 
-    /// A key check's result for a row: it no longer waits for its budget.
-    pub fn health_landed(&self, id: &str, health: KeyHealth) {
-        self.row(id, |r| {
-            r.health = Some(health);
-            r.budget_wait = false;
-        });
+    /// The tag of the key row `id` holds now (`None`: the row is gone).
+    fn holds(&self, id: &str) -> Option<u64> {
+        let view = self.view.peek();
+        view.servers.iter().find(|s| s.id == id).map(|s| s.key_tag)
     }
 
-    /// The rows of `ids` stop waiting for their budget (their check ended without a result).
-    pub fn waits_ended<'a>(&self, ids: impl IntoIterator<Item = &'a String>) {
+    /// A key check's verdict for a row; dropped when the row is gone or holds another key now
+    /// (a refresh re-keyed it while the check ran, b2).
+    pub fn health_landed(&self, key: &CheckKey, health: KeyHealth) {
+        if self.holds(&key.id) == Some(key.tag) {
+            self.row(&key.id, |r| {
+                r.health = Some(health);
+                r.health_tag = key.tag;
+            });
+        }
+    }
+
+    /// A row's key reached `stage` in the check `run` (its first stage shows the run's strip);
+    /// dropped like a verdict for a key the row no longer holds.
+    pub fn staged(&self, run: &RunKey, key: &CheckKey, stage: CheckStage) {
+        self.first_stage(run);
+        if self.holds(&key.id) == Some(key.tag) {
+            let (run, tag) = (run.clone(), key.tag);
+            self.row(&key.id, |r| r.check = Some(RowCheck { run, tag, stage }));
+        }
+    }
+
+    /// The check of the servers going on in this page, if any: one at a time (a1).
+    pub fn current_run(&self) -> Option<RunKey> {
+        if let Some((run, _)) = &*self.launching.read() {
+            return Some(run.clone());
+        }
+        let checks = self.checks.read();
+        let running = checks.iter().find(|(_, c)| c.state.running());
+        running.map(|(run, _)| run.clone())
+    }
+
+    /// A new check `run` starts; its strip shows with its first stage.
+    pub fn run_started(&self, run: RunKey, stop: CancellationToken) {
+        let mut launching = self.launching;
+        launching.set(Some((run, stop)));
+    }
+
+    /// The first stage of `run`: the rows its previous run left lose their lines, its strip
+    /// starts.
+    fn first_stage(&self, run: &RunKey) {
+        let mut launching = self.launching;
+        let Some(stop) = launching
+            .peek()
+            .as_ref()
+            .filter(|(r, _)| r == run)
+            .map(|(_, stop)| stop.clone())
+        else {
+            return;
+        };
+        launching.set(None);
         let mut rows = self.rows;
-        let mut rows = rows.write();
-        for id in ids {
-            if let Some(r) = rows.get_mut(id) {
-                r.budget_wait = false;
+        for r in rows.write().values_mut() {
+            if r.check.as_ref().is_some_and(|c| c.run == *run) {
+                r.check = None;
             }
+        }
+        let mut checks = self.checks;
+        let state = if stop.is_cancelled() {
+            RunState::Stopping
+        } else {
+            RunState::Running
+        };
+        let started = CheckRun {
+            stop,
+            state,
+            totals: None,
+        };
+        checks.write().insert(run.clone(), started);
+    }
+
+    /// «Отменить»: the check stops at once and answers what landed.
+    pub fn stop_run(&self, run: &RunKey) {
+        if let Some((_, stop)) = self.launching.peek().as_ref().filter(|(r, _)| r == run) {
+            stop.cancel();
+            return;
+        }
+        let mut checks = self.checks;
+        if let Some(c) = checks
+            .write()
+            .get_mut(run)
+            .filter(|c| c.state == RunState::Running)
+        {
+            c.stop.cancel();
+            c.state = RunState::Stopping;
+        }
+    }
+
+    /// The check `run` is over: its rows without a result are not checked and its numbers are
+    /// kept as they are now. One that ended before its first stage (refused, failed) leaves
+    /// nothing behind.
+    pub fn run_ended(&self, run: &RunKey) {
+        let mut launching = self.launching;
+        if launching.peek().as_ref().is_some_and(|(r, _)| r == run) {
+            launching.set(None);
+            return;
+        }
+        let mut rows = self.rows;
+        for r in rows.write().values_mut() {
+            if let Some(c) = r
+                .check
+                .as_mut()
+                .filter(|c| c.run == *run && !c.stage.is_final())
+            {
+                c.stage = CheckStage::NotChecked;
+            }
+        }
+        let view = self.view.peek();
+        let numbers = totals(&self.rows.peek(), &row_tags(&view), run, now_ms());
+        drop(view);
+        let mut checks = self.checks;
+        if let Some(c) = checks.write().get_mut(run) {
+            let stopped = c.stop.is_cancelled();
+            c.state = RunState::Ended { stopped };
+            c.totals = Some(numbers);
         }
     }
 

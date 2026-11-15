@@ -7,11 +7,12 @@ use std::rc::Rc;
 use dioxus::core::{Runtime, Task};
 use dioxus::prelude::*;
 use tokio::sync::mpsc;
-use vpnte_base::{AppError, ErrorKind};
+use tokio_util::sync::CancellationToken;
+use vpnte_base::{AppError, AppResult, ErrorKind};
 
-use super::api::ServersApi;
-use super::model::{CountryCheck, ServerView};
-use super::state::Store;
+use super::api::{CheckWatch, ServersApi};
+use super::model::{CountryCheck, HealthReport, ServerView};
+use super::state::{RunKey, Store};
 use crate::lang::{tr_now, translate_now};
 use crate::widgets::Toasts;
 
@@ -26,6 +27,20 @@ pub(crate) use server::save_key_label;
 pub(crate) fn toast_error(toasts: Toasts, title: String, err: &AppError) {
     if err.kind != ErrorKind::Cancelled {
         toasts.error(title, Some(tr_now(&err.user_msg())));
+    }
+}
+
+/// The backend's answer to a check started while another check of the servers runs (the
+/// Maintenance page's): one at a time, said calmly (a1).
+const CHECK_RUNNING: &str = "app.servers.checkRunning";
+
+/// A key check's error: a refusal because another check runs is a calm note, not an error.
+pub(crate) fn check_error(toasts: Toasts, title: String, err: &AppError) {
+    match err.user_msg() {
+        msg if msg.key == CHECK_RUNNING => {
+            toasts.info(title, Some(tr_now(&msg)));
+        }
+        _ => toast_error(toasts, title, err),
     }
 }
 
@@ -121,60 +136,73 @@ impl Actions {
         running.set(Some(task));
     }
 
-    /// «Проверить все» (RU-2026 item 6): every server through itself, under each server name's
-    /// handshake budget; rows take their results as they land and a toast sums up. A second call
-    /// stops the run: the backend keeps what finished, nothing is told.
+    /// «Проверить работу» (RU-2026 item 6): every server through itself, under each server
+    /// name's handshake budget. Rows tell their stage as it happens (p-check-live) and take their
+    /// results as they land, the strip sums up, a toast at the end; a call while it runs is
+    /// «Отменить»: what landed is kept, the strip says the check stopped. Nothing while a
+    /// group's check runs (one check of the servers at a time, a1).
     pub fn check_all(&self) {
-        let store = self.store;
-        let mut running = store.check_task;
-        if let Some(task) = running.take() {
-            task.cancel();
-            // The stopped run names no more rows; none waits for its budget any longer.
-            let waiting: Vec<String> = (store.rows.peek().iter())
-                .filter(|(_, r)| r.budget_wait)
-                .map(|(id, _)| id.clone())
-                .collect();
-            store.waits_ended(&waiting);
-            return;
+        let run = RunKey::List;
+        match self.store.current_run() {
+            Some(current) if current == run => return self.store.stop_run(&run),
+            Some(_) => return,
+            None => {}
         }
         let (api, toasts) = (self.api.clone(), self.toasts);
-        let mut done = store.check_done;
-        done.set(0);
-        let task = self.spawn(async move {
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            let (wtx, mut wrx) = mpsc::unbounded_channel();
-            let run = api.check_all_health_watched(tx, wtx);
-            futures_util::pin_mut!(run);
-            let mut landed = |id: &str, health| {
-                store.health_landed(id, health);
-                *done.write() += 1;
-            };
-            let mut waited = Vec::new();
-            let result = loop {
-                tokio::select! {
-                    result = &mut run => break result,
-                    Some((id, health)) = rx.recv() => landed(&id, health),
-                    Some(id) = wrx.recv() => {
-                        store.row(&id, |r| r.budget_wait = true);
-                        waited.push(id);
-                    }
-                }
-            };
-            while let Ok((id, health)) = rx.try_recv() {
-                landed(&id, health);
-            }
-            store.waits_ended(&waited);
-            let mut running = store.check_task;
-            running.set(None);
+        let start = move |watch| async move { api.check_all_health_watched(watch).await };
+        self.run_check(run, start, move |answer| {
             let title = translate_now("ui.servers.checkAll.done", &[]);
-            match result {
-                Ok(report) => {
+            match answer {
+                Some(Ok(report)) => {
                     toasts.info(title, Some(health_body(&report)));
                 }
-                Err(err) => toast_error(toasts, title, &err),
+                Some(Err(err)) => check_error(toasts, title, &err),
+                None => {}
             }
         });
-        running.set(Some(task));
+    }
+
+    /// Runs the key check `run` in the page root: each key's stages and results go to its row as
+    /// they come (unless the row holds another key now); at the end the rows without a result
+    /// are not checked and `done` gets the answer (`None` after «Отменить»: the strip says it,
+    /// no toast).
+    pub(crate) fn run_check<Fut>(
+        &self,
+        run: RunKey,
+        start: impl FnOnce(CheckWatch) -> Fut + 'static,
+        done: impl FnOnce(Option<AppResult<HealthReport>>) + 'static,
+    ) where
+        Fut: Future<Output = AppResult<HealthReport>> + 'static,
+    {
+        let store = self.store;
+        let stop = CancellationToken::new();
+        store.run_started(run.clone(), stop.clone());
+        self.spawn(async move {
+            let (results, mut landed) = mpsc::unbounded_channel();
+            let (stages, mut staged) = mpsc::unbounded_channel();
+            let call = start(CheckWatch {
+                results,
+                stages,
+                stop: stop.clone(),
+            });
+            futures_util::pin_mut!(call);
+            let result = loop {
+                tokio::select! {
+                    biased;
+                    Some((key, stage)) = staged.recv() => store.staged(&run, &key, stage),
+                    Some((key, health)) = landed.recv() => store.health_landed(&key, health),
+                    result = &mut call => break result,
+                }
+            };
+            while let Ok((key, stage)) = staged.try_recv() {
+                store.staged(&run, &key, stage);
+            }
+            while let Ok((key, health)) = landed.try_recv() {
+                store.health_landed(&key, health);
+            }
+            store.run_ended(&run);
+            done((!stop.is_cancelled()).then_some(result));
+        });
     }
 
     /// Rows a ping-all left measuring (cancelled, failed) get their previous state back.

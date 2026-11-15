@@ -541,18 +541,34 @@ pub trait ServersApi: 'static {      // root component ServersPage; use_servers_
     async fn delete_group(&self, id: &str, delete_servers: bool) -> AppResult<()>;
     async fn check_group_health(&self, id: &str) -> AppResult<HealthReport>;  // { results: Vec<(id, KeyHealth)>,
                                   // not_checked: u32 /* deferred by the handshake budget / probe not started */ }
-    async fn check_group_health_live(&self, id: &str, results: mpsc::UnboundedSender<(String, KeyHealth)>)
-        -> AppResult<HealthReport>;  // p-speed ops3: the same with each result as it lands (default: the
-                                  // plain call); the page's group check uses it, rows update as results land
-    async fn check_all_health(&self, results: mpsc::UnboundedSender<(String, KeyHealth)>)
-        -> AppResult<HealthReport>;  // «Проверить все» (RU-2026 item 6): every server not removed by the user,
-                                  // through itself under each name's budget; results stream; a dropped call
-                                  // stops it and the backend keeps what finished (page: a second click stops)
-    async fn check_group_health_watched(&self, id: &str, results: .., waits: mpsc::UnboundedSender<String>)
-        -> AppResult<HealthReport>;  // lab live-9 L9-7 (default: the live call): `waits` names each row whose
-    async fn check_all_health_watched(&self, results: .., waits: mpsc::UnboundedSender<String>)
-        -> AppResult<HealthReport>;  // check waits for its server name's handshake budget; the row shows
-                                  // «ждёт лимита рукопожатий» (`RowRt.budget_wait`) until its result or the end
+                                  // (the Maintenance page's servers check, group by group)
+    async fn check_group_health_watched(&self, id: &str, watch: CheckWatch) -> AppResult<HealthReport>;
+    async fn check_all_health_watched(&self, watch: CheckWatch) -> AppResult<HealthReport>;
+        // a group's «Проверить» / «Проверить работу» (RU-2026 item 6: every server not removed by the user,
+        // through itself under each name's budget); p-check-live: each key's stage on `watch.stages` as it
+        // happens, results on `watch.results`; `watch.stop` («Отменить») or a dropped call ends the check at
+        // once and the call answers what landed (stored like a finished run's); the rest is not checked.
+        // p-fix-checklive a1: one check of the servers at a time across the app (one operation resource
+        // for the three); a start while another runs answers `app.servers.checkRunning` (the page: a calm
+        // info toast; its other check buttons are disabled meanwhile with «Серверы уже проверяются…»)
+pub struct CheckWatch { pub results: mpsc::UnboundedSender<(CheckKey, KeyHealth)>,
+    pub stages: mpsc::UnboundedSender<(CheckKey, CheckStage)>, pub stop: CancellationToken }
+pub struct CheckKey { pub id: String, pub tag: u64 }  // b2: the row and the key probed; the page drops a
+                                  // stage / result whose row is gone or holds another key (`ServerView::key_tag`,
+                                  // a digest of the key identity, 0 = unreadable) and does not count it
+pub enum CheckStage { Queued, Waiting { until: UnixMs }, Starting { engine: Engine },
+    Requesting { engine: Engine, engine_ms: u32, since: UnixMs },
+    Asked { engine: Engine, engine_ms: u32, asked_ms: u32 } /* b4: the request ended, its time stands */,
+    Done(CheckAnswer), NotChecked }
+pub enum CheckAnswer { Http { status: u16, ms: u32 }, Stalled { bytes: u64 }, Silent { ms: u32 },
+    Failed(KeyHealthReason), Session /* the connected session's own server */ }
+// The page: each row's line under its address («в очереди», «следующее соединение с сервером через 41 с»
+// counted down each second (the clock read at render) with the app's pacing as its title, each key its
+// own turn, «запуск Xray», «sing-box за 840 мс · рукопожатие и тестовый запрос, 3 с», «ответ 200 за
+// 312 мс», «сбой рукопожатия» in red, «не проверено»); a strip under the facts (a group's under its head),
+// shown from the run's first stage: «Проверено 21 из 23 · 2 ждут очереди к серверу, ещё 41 с · 2 сбоя»
+// with «Отменить» (role=status for the totals; the countdown in an aria-live=off span); after a stop
+// «Проверка остановлена: 21 из 23», no toast; an ended strip keeps the numbers it ended with
     async fn set_device(&self, id: &str, device: ClientDevice) -> AppResult<()>; // connected server reconnects
     async fn set_engine(&self, id: &str, engine: EnginePref) -> AppResult<()>; // own engine (Auto = setting);
                                   // impossible forced choice = Validation with the engine Msg; reconnects

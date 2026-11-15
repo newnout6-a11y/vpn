@@ -16,16 +16,21 @@ use tokio_util::sync::CancellationToken;
 use vpnte_base::types::ClientDevice;
 use vpnte_base::{AppError, AppResult, ErrorKind};
 
-use super::api::ServersApi;
+use super::api::{CheckWatch, ServersApi};
 use super::batch::BatchCtl;
+use super::check_model::{CheckKey, CheckStage};
 use super::links_model::{LinkSchemes, QrCode};
 use super::live::{History, LiveCtl};
 use super::live_model::*;
 use super::model::*;
 
 type Reply<T> = oneshot::Receiver<AppResult<T>>;
-/// The list-wide check's queued run: the results it streams, then its held answer.
-type CheckAllRun = (Vec<(String, KeyHealth)>, Reply<HealthReport>);
+/// A key check's queued run: the stages and results it streams, then its held answer.
+pub(super) type CheckAllRun = (
+    Vec<(CheckKey, CheckStage)>,
+    Vec<(CheckKey, KeyHealth)>,
+    Reply<HealthReport>,
+);
 
 /// Counts futures dropped before they finished (= cancelled by the UI).
 struct Track(Rc<Cell<u32>>, bool);
@@ -40,7 +45,7 @@ impl Drop for Track {
 
 /// Backend whose live / history / batch replies are queued by the test.
 #[derive(Default)]
-struct FakeApi {
+pub(super) struct FakeApi {
     state: watch::Sender<ServersView>,
     live: RefCell<VecDeque<Reply<LiveCheck>>>,
     history: RefCell<VecDeque<AppResult<Vec<LiveCheck>>>>,
@@ -53,9 +58,24 @@ struct FakeApi {
     /// Imports the page asked for (`add`): a link must never cause one by itself.
     adds: Cell<u32>,
     check_all: RefCell<Option<CheckAllRun>>,
+    /// A group's check (any group), and how many group checks the page started.
+    check_group: RefCell<Option<CheckAllRun>>,
+    group_checks: Cell<u32>,
     /// The app's answer to the TLS tricks editor, and the held replies of its saves.
     tricks: RefCell<Option<TricksView>>,
     tricks_saves: RefCell<VecDeque<Reply<()>>>,
+}
+
+impl FakeApi {
+    /// Group checks the page started.
+    pub(super) fn group_checks(&self) -> u32 {
+        self.group_checks.get()
+    }
+
+    /// A queued list check the page has not started.
+    pub(super) fn list_check_waiting(&self) -> bool {
+        self.check_all.borrow().is_some()
+    }
 }
 
 async fn held<T>(reply: Option<Reply<T>>, dropped: Rc<Cell<u32>>) -> AppResult<T> {
@@ -70,6 +90,31 @@ async fn held<T>(reply: Option<Reply<T>>, dropped: Rc<Cell<u32>>) -> AppResult<T
 
 fn unused<T>() -> AppResult<T> {
     Err(AppError::new(ErrorKind::Internal))
+}
+
+/// Streams a queued check's stages and results, then holds its answer; a stop answers at once
+/// with what landed, as the backend does.
+async fn watched(
+    run: Option<CheckAllRun>,
+    watch: CheckWatch,
+    dropped: Rc<Cell<u32>>,
+) -> AppResult<HealthReport> {
+    let Some((stages, stream, reply)) = run else {
+        return unused();
+    };
+    for stage in stages {
+        let _ = watch.stages.send(stage);
+    }
+    for result in &stream {
+        let _ = watch.results.send(result.clone());
+    }
+    tokio::select! {
+        answer = held(Some(reply), dropped) => answer,
+        () = watch.stop.cancelled() => Ok(HealthReport {
+            results: stream.into_iter().map(|(k, h)| (k.id, h)).collect(),
+            not_checked: 0,
+        }),
+    }
 }
 
 #[async_trait::async_trait(?Send)]
@@ -174,17 +219,18 @@ impl ServersApi for FakeApi {
     async fn check_group_health(&self, _: &str) -> AppResult<HealthReport> {
         unused()
     }
-    async fn check_all_health(
+    async fn check_group_health_watched(
         &self,
-        results: mpsc::UnboundedSender<(String, KeyHealth)>,
+        _: &str,
+        watch: CheckWatch,
     ) -> AppResult<HealthReport> {
-        let Some((stream, reply)) = self.check_all.borrow_mut().take() else {
-            return unused();
-        };
-        for result in stream {
-            let _ = results.send(result);
-        }
-        held(Some(reply), self.dropped.clone()).await
+        self.group_checks.set(self.group_checks.get() + 1);
+        let run = self.check_group.borrow_mut().take();
+        watched(run, watch, self.dropped.clone()).await
+    }
+    async fn check_all_health_watched(&self, watch: CheckWatch) -> AppResult<HealthReport> {
+        let run = self.check_all.borrow_mut().take();
+        watched(run, watch, self.dropped.clone()).await
     }
     async fn set_device(&self, _: &str, _: ClientDevice) -> AppResult<()> {
         unused()
@@ -266,7 +312,7 @@ impl ServersApi for FakeApi {
     }
 }
 
-fn fake() -> Rc<FakeApi> {
+pub(super) fn fake() -> Rc<FakeApi> {
     Rc::new(FakeApi {
         state: watch::Sender::new(ServersView::default()),
         live: RefCell::default(),
@@ -279,6 +325,8 @@ fn fake() -> Rc<FakeApi> {
         link: RefCell::default(),
         adds: Cell::new(0),
         check_all: RefCell::default(),
+        check_group: RefCell::default(),
+        group_checks: Cell::new(0),
         tricks: RefCell::default(),
         tricks_saves: RefCell::default(),
     })
@@ -730,7 +778,8 @@ fn page_root() -> Element {
     let slot = use_context::<Rc<RefCell<Option<Actions>>>>();
     let toasts = crate::widgets::Toasts::use_provider();
     let scope = dioxus::core::current_scope_id();
-    let store = use_hook(|| Store::new(scope, ServersView::default(), Vec::new()));
+    // As the page does: the backend's list as it is now.
+    let store = use_hook(|| Store::new(scope, api.state().borrow().clone(), Vec::new()));
     let actions = use_hook(|| Actions {
         store,
         api: api.clone(),
@@ -877,7 +926,7 @@ fn export_texts_stay_calm() {
 }
 
 /// A key that answered (the fake's results).
-fn alive(at: i64) -> KeyHealth {
+pub(super) fn alive(at: i64) -> KeyHealth {
     KeyHealth {
         online: true,
         latency_ms: Some(320),
@@ -886,40 +935,95 @@ fn alive(at: i64) -> KeyHealth {
     }
 }
 
-/// Queues the list-wide check's streamed results and holds its answer.
-fn hold_check_all(
+/// Queues the list-wide check's stages and streamed results (about the key tag 0 each row of
+/// the fake list holds) and holds its answer (a stop answers at once with the streamed results,
+/// as the backend does).
+pub(super) fn hold_check_all(
     api: &FakeApi,
+    stages: Vec<(String, CheckStage)>,
     stream: Vec<(String, KeyHealth)>,
 ) -> oneshot::Sender<AppResult<HealthReport>> {
-    let (tx, rx) = oneshot::channel();
-    api.check_all.replace(Some((stream, rx)));
+    let (run, tx) = queued(stages, stream);
+    api.check_all.replace(Some(run));
     tx
 }
 
-/// p-small (RU-2026 item 6): «Проверить все» puts each result into its row as it lands; a second
-/// click stops the run without a toast (the backend keeps what finished); a finished run sums up
-/// in one toast that names the keys left unchecked.
+/// [`hold_check_all`] for the next group check.
+pub(super) fn hold_check_group(
+    api: &FakeApi,
+    stages: Vec<(String, CheckStage)>,
+) -> oneshot::Sender<AppResult<HealthReport>> {
+    let (run, tx) = queued(stages, Vec::new());
+    api.check_group.replace(Some(run));
+    tx
+}
+
+fn queued(
+    stages: Vec<(String, CheckStage)>,
+    stream: Vec<(String, KeyHealth)>,
+) -> (CheckAllRun, oneshot::Sender<AppResult<HealthReport>>) {
+    let key = |id: String| CheckKey { id, tag: 0 };
+    let stages = stages.into_iter().map(|(id, s)| (key(id), s)).collect();
+    let stream = stream.into_iter().map(|(id, h)| (key(id), h)).collect();
+    let (tx, rx) = oneshot::channel();
+    ((stages, stream, rx), tx)
+}
+
+/// The fake list's rows `ids` (one group-less row each, key tag 0).
+pub(super) fn list_of(api: &FakeApi, ids: &[&str]) {
+    let row = |id: &&str| ServerView {
+        id: (*id).to_owned(),
+        name: format!("Server {id}"),
+        host: format!("{id}.example.net"),
+        port: 443,
+        protocol: "vless".into(),
+        enabled: true,
+        ..ServerView::default()
+    };
+    api.state
+        .send_modify(|v| v.servers = ids.iter().map(row).collect());
+}
+
+/// p-small (RU-2026 item 6) + p-check-live: «Проверить работу» puts each result into its row as
+/// it lands; a second click is «Отменить»: the backend answers what landed at once, the rows
+/// without a result are not checked, and no toast (the strip says it); a finished run sums up in
+/// one toast that names the keys left unchecked.
 #[tokio::test]
 async fn check_all_streams_rows_and_a_second_click_stops() {
+    use super::state::{RunKey, RunState};
     let api = fake();
+    list_of(&api, &["s1", "s2"]);
     let (mut dom, actions) = mount_page(&api);
-    let _held = hold_check_all(&api, vec![("s1".into(), alive(1))]);
+    let stages = vec![
+        ("s1".to_owned(), CheckStage::Queued),
+        ("s2".to_owned(), CheckStage::Queued),
+    ];
+    let _held = hold_check_all(&api, stages, vec![("s1".into(), alive(1))]);
     dom.in_runtime(|| actions.check_all());
     settle(&mut dom, 4, 20).await;
     let (row, running) = dom.in_runtime(|| {
         let rows = actions.store.rows.peek();
         let row = rows.get("s1").and_then(|r| r.health.clone());
-        (row, actions.store.check_task.peek().is_some())
+        (row, actions.store.current_run() == Some(RunKey::List))
     });
     assert_eq!(row, Some(alive(1)));
     assert!(running);
     dom.in_runtime(|| actions.check_all());
     settle(&mut dom, 4, 20).await;
-    assert_eq!(api.dropped.get(), 1, "the backend call was dropped");
-    assert!(dom.in_runtime(|| actions.store.check_task.peek().is_none()));
+    let (s2, state) = dom.in_runtime(|| {
+        let rows = actions.store.rows.peek();
+        let s2 = rows
+            .get("s2")
+            .and_then(|r| r.check.clone())
+            .map(|c| c.stage);
+        let checks = actions.store.checks.peek();
+        (s2, checks.get(&RunKey::List).map(|c| c.state))
+    });
+    assert_eq!(s2, Some(CheckStage::NotChecked));
+    assert_eq!(state, Some(RunState::Ended { stopped: true }));
     assert!(dom.in_runtime(|| actions.toasts.list()).is_empty());
 
-    let done = hold_check_all(&api, vec![("s2".into(), alive(2))]);
+    let done = hold_check_all(&api, Vec::new(), vec![("s2".into(), alive(2))]);
     dom.in_runtime(|| actions.check_all());
     settle(&mut dom, 4, 20).await;
     let report = HealthReport {
@@ -936,7 +1040,7 @@ async fn check_all_streams_rows_and_a_second_click_stops() {
             .as_ref()
             .is_some_and(|d| d.contains(". "))
     );
-    assert!(dom.in_runtime(|| actions.store.check_task.peek().is_none()));
+    assert_eq!(dom.in_runtime(|| actions.store.current_run()), None);
 }
 
 /// What the renderer was asked to show: dynamic texts, and the click listeners in mount order.

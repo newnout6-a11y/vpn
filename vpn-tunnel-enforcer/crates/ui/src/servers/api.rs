@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{ClientDevice, EnginePref};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 
+use super::check_model::{CheckKey, CheckStage};
 use super::links_model::{LinkSchemes, QrCode};
 use super::live_model::{BatchProgress, BatchResult, LiveCheck, LiveMode, LiveProgress};
 use super::model::{
@@ -91,46 +92,23 @@ pub trait ServersApi: 'static {
     /// Also for recovered (orphan) group ids: applies the choice to the servers carrying the id.
     async fn delete_group(&self, id: &str, delete_servers: bool) -> AppResult<()>;
     /// Checks the keys of the group's current (not removed) servers; keys that could not be
-    /// checked now (handshake budget, probe setup) are counted in the report.
+    /// checked now (handshake budget, probe setup) are counted in the report. One check of the
+    /// servers runs at a time across the app (p-fix-checklive a1): while another runs (this
+    /// page's, the Maintenance page's) the start is refused with a calm reason.
     async fn check_group_health(&self, id: &str) -> AppResult<HealthReport>;
-    /// [`ServersApi::check_group_health`] whose results also arrive on `results` as they land
-    /// (the group check runs like the list check: a name the budget holds back waits alone).
-    async fn check_group_health_live(
-        &self,
-        id: &str,
-        results: mpsc::UnboundedSender<(String, KeyHealth)>,
-    ) -> AppResult<HealthReport> {
-        drop(results);
-        self.check_group_health(id).await
-    }
-    /// Checks every server the user has not removed through the server itself, behind each
-    /// server name's handshake budget (RU-2026 item 6); each result arrives on `results` as it
-    /// lands. Dropping the future stops the check: what finished is kept.
-    async fn check_all_health(
-        &self,
-        results: mpsc::UnboundedSender<(String, KeyHealth)>,
-    ) -> AppResult<HealthReport>;
-    /// [`ServersApi::check_group_health_live`] that also names on `waits` each row whose check
-    /// waits for its server name's handshake budget, before the wait (lab live-9 L9-7).
+    /// [`ServersApi::check_group_health`] that tells each key's stage and result on `watch` as
+    /// they happen and stops at once on `watch.stop`, answering what landed (p-check-live; the
+    /// group check runs like the list check: a name the budget holds back waits alone).
     async fn check_group_health_watched(
         &self,
         id: &str,
-        results: mpsc::UnboundedSender<(String, KeyHealth)>,
-        waits: mpsc::UnboundedSender<String>,
-    ) -> AppResult<HealthReport> {
-        drop(waits);
-        self.check_group_health_live(id, results).await
-    }
-    /// [`ServersApi::check_all_health`] that also names on `waits` each row whose check waits
-    /// for its server name's handshake budget, before the wait (lab live-9 L9-7).
-    async fn check_all_health_watched(
-        &self,
-        results: mpsc::UnboundedSender<(String, KeyHealth)>,
-        waits: mpsc::UnboundedSender<String>,
-    ) -> AppResult<HealthReport> {
-        drop(waits);
-        self.check_all_health(results).await
-    }
+        watch: CheckWatch,
+    ) -> AppResult<HealthReport>;
+    /// Checks every server the user has not removed through the server itself, behind each
+    /// server name's handshake budget (RU-2026 item 6), telling each key's stage and result on
+    /// `watch` as they happen. `watch.stop` or dropping the future stops the check: what
+    /// finished is kept. One check of the servers at a time, as for a group.
+    async fn check_all_health_watched(&self, watch: CheckWatch) -> AppResult<HealthReport>;
 
     /// Device persona of a server; the connected server reconnects.
     async fn set_device(&self, id: &str, device: ClientDevice) -> AppResult<()>;
@@ -211,6 +189,19 @@ pub trait ServersApi: 'static {
     /// A portable copy's «open links here»: every free scheme and every scheme of ours now
     /// opens this copy; answers the list after the change.
     async fn adopt_link_schemes(&self) -> AppResult<LinkSchemes>;
+}
+
+/// Where a running key check reports to the page, and how the page stops it (p-check-live).
+/// Both name the row and the key probed: the page drops what is about a key its row no longer
+/// holds, or a row that is gone.
+pub struct CheckWatch {
+    /// Each key's verdict as it lands.
+    pub results: mpsc::UnboundedSender<(CheckKey, KeyHealth)>,
+    /// Each key's stage as it happens, in order (all of a key's stages before its result).
+    pub stages: mpsc::UnboundedSender<(CheckKey, CheckStage)>,
+    /// «Отменить»: the check stops at once; pending and waiting keys are dropped, running probes
+    /// end with their engines, and the call answers what landed.
+    pub stop: CancellationToken,
 }
 
 /// The [`ServersApi`] from context.

@@ -9,7 +9,7 @@ use std::net::IpAddr;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
@@ -88,6 +88,9 @@ pub struct TransferReport {
     /// From the start to the first response head through the server: the round trip of the
     /// key (connect, handshake, request).
     pub answer_ms: Option<u32>,
+    /// HTTP status of the last response head (the transfer's, else the trace's): what the
+    /// destination answered through the key (p-check-live shows it).
+    pub status: Option<u16>,
 }
 
 /// Why a step stopped.
@@ -111,8 +114,10 @@ pub(crate) async fn check(
     // Set from inside the exchange and read after it, also when a stall cut it short.
     let answered = OnceLock::new();
     let traced = OnceLock::new();
-    let head = || {
+    let status = AtomicU16::new(0);
+    let head = |code: u16| {
         answered.get_or_init(|| rtt_ms(started.elapsed()));
+        status.store(code, Ordering::Relaxed);
     };
     let run = async {
         let (mut stream, _) = wire
@@ -145,6 +150,7 @@ pub(crate) async fn check(
         transfer,
         trace: traced.get().copied(),
         answer_ms: answered.get().copied(),
+        status: Some(status.load(Ordering::Relaxed)).filter(|&code| code != 0),
     })
 }
 
@@ -177,11 +183,11 @@ const TRACE_CAP: usize = 16 * 1024;
 
 /// The trace on the open connection (kept alive for the transfer). A non-2xx answer or a body
 /// without an address is just no trace: the transfer still decides.
-async fn trace(stream: &mut Stream, on_head: &(dyn Fn() + Sync)) -> Result<Option<Trace>, Stop> {
+async fn trace(stream: &mut Stream, on_head: &(dyn Fn(u16) + Sync)) -> Result<Option<Trace>, Stop> {
     let (head, body) = exchange_head(stream, &request("/cdn-cgi/trace", "keep-alive"))
         .await
         .map_err(head_stop)?;
-    on_head();
+    on_head(head.status);
     let body = read_body(stream, &head, body, TRACE_CAP)
         .await
         .map_err(Stop::Failed)?;
@@ -196,12 +202,12 @@ async fn trace(stream: &mut Stream, on_head: &(dyn Fn() + Sync)) -> Result<Optio
 
 /// The transfer: the body must reach [`TRANSFER_BYTES`] (chunk framing, if any, counts too:
 /// the point is the volume, not the payload).
-async fn download(stream: &mut Stream, on_head: &(dyn Fn() + Sync)) -> Result<(), Stop> {
+async fn download(stream: &mut Stream, on_head: &(dyn Fn(u16) + Sync)) -> Result<(), Stop> {
     let path = format!("/__down?bytes={TRANSFER_BYTES}");
     let (head, body) = exchange_head(stream, &request(&path, "close"))
         .await
         .map_err(head_stop)?;
-    on_head();
+    on_head(head.status);
     if !(200..300).contains(&head.status) {
         return Err(Stop::Failed(format!("http status {}", head.status)));
     }

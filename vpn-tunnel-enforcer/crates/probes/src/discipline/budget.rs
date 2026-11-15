@@ -94,7 +94,7 @@ impl From<BudgetError> for AppError {
 /// Reservations of one endpoint that can still share a window with a new one, oldest first.
 /// Pruned by time, not by count: a cancelled wait gives its slot back, and the reservations
 /// before it must then still count.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct Slots {
     at: VecDeque<Instant>,
     hold_until: Option<Instant>,
@@ -151,7 +151,25 @@ impl HandshakeBudget {
         max_wait: Duration,
         cancel: &CancellationToken,
     ) -> Result<(), BudgetError> {
-        let at = self.reserve_at(endpoint, Instant::now(), max_wait)?;
+        self.acquire_noting(endpoint, max_wait, cancel, |_| {})
+            .await
+    }
+
+    /// [`HandshakeBudget::acquire`] that names its own wait before it sleeps, when the slot is
+    /// not free now (p-check-live: the page counts it down instead of a silent minute).
+    pub(crate) async fn acquire_noting(
+        &self,
+        endpoint: &Endpoint,
+        max_wait: Duration,
+        cancel: &CancellationToken,
+        on_wait: impl FnOnce(Duration),
+    ) -> Result<(), BudgetError> {
+        let now = Instant::now();
+        let at = self.reserve_at(endpoint, now, max_wait)?;
+        let wait = at.saturating_duration_since(now);
+        if !wait.is_zero() {
+            on_wait(wait);
+        }
         let pending = Pending {
             budget: self,
             endpoint,
@@ -212,6 +230,32 @@ impl HandshakeBudget {
         map.get(endpoint).map_or(Duration::ZERO, |s| {
             s.next_free(now).saturating_duration_since(now)
         })
+    }
+
+    /// The waits of the next `n` handshakes to `endpoint` when they go one after another, each
+    /// at least `apart` after the one before (one chain of a list check: a probe at a time).
+    /// `None` for each one before the first the budget holds back past that pace (its turn waits
+    /// only for the keys before it), `Some(wait from now)` from that one on (the keys behind a
+    /// held one wait for it too); the first is [`Self::wait_for`]'s. Nothing is reserved (p-fix-checklive a3: each key behind a held name gets its own countdown,
+    /// not the first key's, which ran out and started again for the keys of a later window).
+    pub fn waits_in_turn(
+        &self,
+        endpoint: &Endpoint,
+        n: usize,
+        apart: Duration,
+    ) -> Vec<Option<Duration>> {
+        let now = Instant::now();
+        let mut slots = self.slots.lock().get(endpoint).cloned().unwrap_or_default();
+        let (mut ready, mut held) = (now, false);
+        (0..n)
+            .map(|_| {
+                let at = slots.next_free(ready);
+                held |= at > ready;
+                slots.at.push_back(at);
+                ready = at + apart;
+                held.then(|| at.saturating_duration_since(now))
+            })
+            .collect()
     }
 
     fn release(&self, endpoint: &Endpoint, at: Instant) {

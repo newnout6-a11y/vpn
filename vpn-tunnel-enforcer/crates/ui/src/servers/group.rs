@@ -7,6 +7,7 @@ use std::num::NonZeroU32;
 use dioxus::prelude::*;
 
 use super::actions::Actions;
+use super::check::CheckStrip;
 use super::facts::GroupFacts;
 use super::model::GroupSource;
 use super::present::{
@@ -15,7 +16,7 @@ use super::present::{
     refresh_label_key,
 };
 use super::row::ServerRow;
-use super::state::Confirm;
+use super::state::{Confirm, RunKey};
 use crate::t;
 use crate::widgets::{
     Badge, Button, ButtonKind, Icon, IconButton, IconGlyph, Select, SelectOption, Size, Tone,
@@ -33,6 +34,10 @@ pub(crate) fn GroupCard(bucket: GroupBucket) -> Element {
     let id = group.id.clone();
     let expanded = store.expanded.read().contains(&id);
     let busy = store.busy.read().get(&id).copied().unwrap_or_default();
+    // One check of the servers at a time (a1): this group's, or another that waits for it.
+    let running_check = store.current_run();
+    let checking = running_check == Some(RunKey::Group(id.clone()));
+    let other_check = running_check.is_some() && !checking;
     let renaming = store
         .rename
         .read()
@@ -175,10 +180,11 @@ pub(crate) fn GroupCard(bucket: GroupBucket) -> Element {
                         Button {
                             kind: ButtonKind::Link,
                             small: true,
-                            busy: busy.health,
-                            disabled: current.is_empty(),
+                            busy: checking,
+                            disabled: current.is_empty() || other_check,
+                            disabled_reason: other_check.then(|| t!("ui.servers.check.oneAtATime")),
                             onclick: move |_| a_health.check_health(&id_health, &name_health),
-                            {if busy.health { t!("servers.groups.checking") } else { t!("servers.groups.checkHealth") }}
+                            {if checking { t!("servers.groups.checking") } else { t!("servers.groups.checkHealth") }}
                         }
                         IconButton {
                             glyph: IconGlyph::Edit,
@@ -200,6 +206,7 @@ pub(crate) fn GroupCard(bucket: GroupBucket) -> Element {
                     }
                 }
             }
+            CheckStrip { run: RunKey::Group(id.clone()) }
             if expanded {
                 div { class: "srv-group-body", id: "{body_id}",
                     if let Some(group) = stored.clone() {

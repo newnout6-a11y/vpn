@@ -39,7 +39,9 @@ pub(super) async fn check_group(src: &ServerProfiles, group_id: &str) -> AppResu
     let probe_ctx = src.probe_ctx.clone();
     let opts = RunOpts {
         source: Source::Unknown,
-        resource: Some(format!("health:{id}").into()),
+        // The one resource of every check of the servers: the Servers page's list and group
+        // checks and the Maintenance page's refuse to run beside this one (p-fix-checklive a1).
+        resource: Some(crate::api_servers::CHECK_RESOURCE.into()),
         ..RunOpts::default()
     };
     let checked = src

@@ -23,6 +23,7 @@ mod tests;
 mod tricks;
 mod verdict;
 
+pub(crate) use checks::CHECK_RESOURCE;
 pub use phones::LinkInbox;
 
 use std::any::Any;
@@ -44,8 +45,8 @@ use vpnte_servers::model::{GroupId, ProfileId};
 use vpnte_servers::store::Servers;
 use vpnte_tunnel::lifecycle::ConnError;
 use vpnte_ui::servers::{
-    AddTarget, BatchProgress, BatchResult, CountryCheck, ExportReport, GeoInfo, HealthReport,
-    ImportReport, KeyHealth, LinkSchemes, LiveCheck, LiveMode, LiveProgress, ProbeReport,
+    AddTarget, BatchProgress, BatchResult, CheckWatch, CountryCheck, ExportReport, GeoInfo,
+    HealthReport, ImportReport, LinkSchemes, LiveCheck, LiveMode, LiveProgress, ProbeReport,
     ProxyStartReport, QrCode, RefreshOutcome, SelectOutcome, ServersApi, ServersView,
     SubscriptionRequest, TricksChoice, TricksView,
 };
@@ -359,23 +360,9 @@ impl ServersApi for ServersBackend {
 
     async fn check_group_health(&self, id: &str) -> AppResult<HealthReport> {
         let (shared, id) = (self.shared.clone(), GroupId::from(id));
-        let shutdown = &self.shared.backend.shutdown;
-        cancellable(shutdown, |token| {
-            checks::group_health(shared, id, token, None, None)
-        })
-        .await
-    }
-
-    async fn check_group_health_live(
-        &self,
-        id: &str,
-        results: mpsc::UnboundedSender<(String, KeyHealth)>,
-    ) -> AppResult<HealthReport> {
-        let (shared, id) = (self.shared.clone(), GroupId::from(id));
-        let shutdown = &self.shared.backend.shutdown;
-        let live = Some(results);
-        cancellable(shutdown, |token| {
-            checks::group_health(shared, id, token, live, None)
+        let feed = checks::Feed::new(None, None);
+        cancellable(&self.shared.backend.shutdown, |call| {
+            checks::group_health(shared, id, vec![call], feed)
         })
         .await
     }
@@ -383,37 +370,31 @@ impl ServersApi for ServersBackend {
     async fn check_group_health_watched(
         &self,
         id: &str,
-        results: mpsc::UnboundedSender<(String, KeyHealth)>,
-        waits: mpsc::UnboundedSender<String>,
+        watch: CheckWatch,
     ) -> AppResult<HealthReport> {
         let (shared, id) = (self.shared.clone(), GroupId::from(id));
-        let shutdown = &self.shared.backend.shutdown;
-        let (live, waits) = (Some(results), Some(waits));
-        cancellable(shutdown, |token| {
-            checks::group_health(shared, id, token, live, waits)
+        let CheckWatch {
+            results,
+            stages,
+            stop,
+        } = watch;
+        let feed = checks::Feed::new(Some(results), Some(stages));
+        cancellable(&self.shared.backend.shutdown, |call| {
+            checks::group_health(shared, id, vec![call, stop], feed)
         })
         .await
     }
 
-    async fn check_all_health(
-        &self,
-        results: mpsc::UnboundedSender<(String, KeyHealth)>,
-    ) -> AppResult<HealthReport> {
-        let (shared, shutdown) = (self.shared.clone(), &self.shared.backend.shutdown);
-        cancellable(shutdown, |stop| {
-            checks::list_health(shared, results, None, stop)
-        })
-        .await
-    }
-
-    async fn check_all_health_watched(
-        &self,
-        results: mpsc::UnboundedSender<(String, KeyHealth)>,
-        waits: mpsc::UnboundedSender<String>,
-    ) -> AppResult<HealthReport> {
-        let (shared, shutdown) = (self.shared.clone(), &self.shared.backend.shutdown);
-        cancellable(shutdown, |stop| {
-            checks::list_health(shared, results, Some(waits), stop)
+    async fn check_all_health_watched(&self, watch: CheckWatch) -> AppResult<HealthReport> {
+        let shared = self.shared.clone();
+        let CheckWatch {
+            results,
+            stages,
+            stop,
+        } = watch;
+        let feed = checks::Feed::new(Some(results), Some(stages));
+        cancellable(&self.shared.backend.shutdown, |call| {
+            checks::list_health(shared, vec![call, stop], feed)
         })
         .await
     }

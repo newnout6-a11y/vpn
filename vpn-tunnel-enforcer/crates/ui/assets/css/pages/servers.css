@@ -106,6 +106,15 @@
 .srv-row-exit { color: var(--ink); font-weight: 600; }
 .srv-row-ip { color: var(--ink); }
 .srv-row-ip.is-muted { color: var(--mute); }
+/* p-check-live: where the key is in its check, in numbers; red only for a failure */
+.srv-row-check { display: flex; min-width: 0; margin-top: 4px; }
+.srv-check-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--mute); font-variant-numeric: tabular-nums; }
+.srv-check-line:is([data-stage='starting'], [data-stage='requesting'], [data-stage='asked'], [data-stage='done']) { color: var(--ink); }
+.srv-check-line.is-fail { color: var(--signal-ink); font-weight: 500; }
+.srv-check { display: flex; min-height: 36px; align-items: center; gap: 16px; border-left: 3px solid var(--rule-strong); background: var(--paper); padding: 4px 8px 4px 12px; }
+.srv-check-totals { flex: 1; min-width: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+.srv-group > .srv-check { min-height: 32px; border-left: 0; border-top: 1px solid var(--rule); padding-left: 16px; }
+.srv-group.is-open > .srv-check { border-top: 0; border-bottom: 1px solid var(--rule); }
 .srv-row-ping { display: flex; min-width: 92px; align-items: center; justify-content: flex-end; gap: 6px; }
 .srv-row-ms { min-width: 48px; font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
 .srv-signal { display: inline-flex; width: 14px; height: 14px; align-items: center; justify-content: center; flex-shrink: 0; }

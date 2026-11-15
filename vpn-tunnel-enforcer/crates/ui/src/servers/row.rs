@@ -5,6 +5,7 @@ use dioxus::prelude::*;
 use vpnte_base::types::{EnginePref, UnixMs};
 
 use super::actions::{Actions, save_key_label, toast_error};
+use super::check::CheckLine;
 use super::menu::{MenuItem, OverflowMenu};
 use super::model::{EnginePlan, GroupView, ServerView, ServersView, WhitelistReady};
 use super::present::{
@@ -274,9 +275,6 @@ pub(crate) fn ServerRow(server: ServerView, group: Option<GroupView>) -> Element
                         Badge { tone, title: t!(key), "{label}" }
                     }
                     span { class: "srv-row-addr", title: "{server.host}:{server.port}", "{server.host}:{server.port}" }
-                    if rt.budget_wait {
-                        Badge { tone: Tone::Unknown, {t!("ui.servers.row.budgetWait")} }
-                    }
                     if let (Some(exit), Some(title)) = (server.exit_ip, exit_title) {
                         span { class: "srv-row-exit", title: "{title}", {t!("ui.servers.row.exit", ip = exit)} }
                     }
@@ -286,6 +284,13 @@ pub(crate) fn ServerRow(server: ServerView, group: Option<GroupView>) -> Element
                         title: "{ip_title}",
                         "IP: "
                         {server.resolved_ip.map_or_else(|| "—".to_owned(), |ip| ip.to_string())}
+                    }
+                }
+                // p-check-live: where the key is in its last check, as it happens (while the row
+                // holds the key that check was about).
+                if let Some(check) = rt.check.clone().filter(|c| c.tag == server.key_tag) {
+                    div { class: "srv-row-check",
+                        CheckLine { stage: check.stage }
                     }
                 }
             }

@@ -9,6 +9,7 @@ use super::actions::Actions;
 use super::add::AddDialog;
 use super::api::use_servers_api;
 use super::batch::BatchDialog;
+use super::check::CheckStrip;
 use super::detail::ServerDetail;
 use super::group::GroupCard;
 use super::links::use_link_intake;
@@ -16,7 +17,7 @@ use super::model::{AddTarget, ServersView};
 use super::present::{buckets, counts};
 use super::request::RequestDialog;
 use super::schemes::LinkSchemesDialog;
-use super::state::{Bulk, BulkKind, Confirm, Store, reconcile_expanded};
+use super::state::{Bulk, BulkKind, Confirm, RunKey, Store, reconcile_expanded};
 use crate::pages::{Page, nav_number, use_page_active};
 use crate::t;
 use crate::widgets::{
@@ -72,6 +73,24 @@ pub fn ServersPage() -> Element {
             }
         }
     });
+    // The countdowns of a running key check (p-check-live), while the page is shown; shown
+    // again, they render at once instead of keeping the numbers of when it was hidden (a2).
+    use_future(move || async move {
+        let mut tick = store.tick;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let running = store.checks.peek().values().any(|c| c.state.running());
+            if running && *active.peek() {
+                tick.set(now_ms());
+            }
+        }
+    });
+    use_effect(move || {
+        if active() {
+            let mut tick = store.tick;
+            tick.set(now_ms());
+        }
+    });
     use_effect({
         let actions = actions.clone();
         move || follow_store(&actions, &store.view.read())
@@ -85,8 +104,10 @@ pub fn ServersPage() -> Element {
     let empty = loaded && view.servers.is_empty() && view.groups.is_empty();
     drop(view);
     let pinging = store.ping_task.read().is_some();
-    let checking = store.check_task.read().is_some();
-    let checked = *store.check_done.read();
+    // One check of the servers at a time (a1): while a group's runs, this one waits.
+    let current = store.current_run();
+    let checking = current == Some(RunKey::List);
+    let other_check = current.is_some() && !checking;
     let number = Page::ALL
         .iter()
         .position(|p| *p == Page::Servers)
@@ -112,18 +133,15 @@ pub fn ServersPage() -> Element {
                     onclick: move |_| a_ping.ping_all(),
                     {if pinging { t!("ui.servers.pingAllStop") } else { t!("ui.servers.pingAllOpen") }}
                 }
+                // While it runs the strip below says how far it is and offers «Отменить».
                 Button {
                     kind: ButtonKind::Ghost,
-                    disabled: total == 0,
-                    title: if checking { t!("ui.servers.checkAll.stopTitle") } else { t!("ui.servers.checkAll.title") },
+                    disabled: total == 0 || current.is_some(),
+                    busy: checking,
+                    title: (!other_check).then(|| t!("ui.servers.checkAll.title")),
+                    disabled_reason: other_check.then(|| t!("ui.servers.check.oneAtATime")),
                     onclick: move |_| a_check.check_all(),
-                    {if checking { t!("ui.servers.checkAll.stop") } else { t!("ui.servers.checkAll.open") }}
-                }
-                if checking {
-                    // Progress as results land (a long list takes minutes under the budget).
-                    span { class: "swiss-mono", role: "status",
-                        {t!("ui.servers.checkAll.progress", count = checked)}
-                    }
+                    {t!("ui.servers.checkAll.open")}
                 }
                 Button {
                     kind: ButtonKind::Ghost,
@@ -170,6 +188,7 @@ pub fn ServersPage() -> Element {
                     span { class: "srv-fact-note", {t!("ui.servers.export.warning")} }
                 }
             }
+            CheckStrip { run: RunKey::List }
             if foreign {
                 p { class: "srv-strip is-warn", role: "status", {t!("ui.servers.foreignVpn")} }
             }

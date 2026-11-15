@@ -176,6 +176,7 @@ impl Seed {
         let online = self.ping.is_some();
         ServerView {
             id: self.id.into(),
+            key_tag: 0,
             name: self.name.into(),
             protocol: self.protocol.into(),
             host: self.host(),

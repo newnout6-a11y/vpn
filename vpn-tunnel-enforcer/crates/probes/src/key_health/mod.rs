@@ -11,7 +11,7 @@
 //! connection.
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -27,20 +27,23 @@ use crate::discipline::{
     Transfer, TransferReport, Verdict, classify, real_certificate,
 };
 use crate::live::wire::{Dial, Wire};
-use crate::ping::{NetPath, PingTarget};
+use crate::ping::{NetPath, PingTarget, rtt_ms};
 
 mod classify;
 mod config;
 mod engine;
 mod list;
+mod stage;
 #[cfg(test)]
 mod tests;
 
 pub use classify::{classify_failure, parse_trace};
 pub use config::{DIRECT_TAG, INBOUND_TAG, PROXY_TAG, Uplink, probe_config};
 pub use list::{LIST_DEADLINE, ListGroup, ListOutcome, check_list};
+pub use stage::{KeyAnswer, KeyStage};
 
 use engine::{Running, Start};
+use stage::Stages;
 
 /// Probes running at once in a batch.
 pub const CONCURRENCY: usize = 5;
@@ -285,8 +288,18 @@ pub async fn check_profile_verdict(
     ctx: &ProbeCtx,
     cancel: &CancellationToken,
 ) -> AppResult<KeyCheck> {
+    check_profile_staged(p, ctx, cancel, &Stages::default()).await
+}
+
+/// [`check_profile_verdict`] telling its stages as they happen (the list and group checks).
+pub(crate) async fn check_profile_staged(
+    p: &Profile,
+    ctx: &ProbeCtx,
+    cancel: &CancellationToken,
+    stages: &Stages,
+) -> AppResult<KeyCheck> {
     let wire = Wire::verified().map_err(AppError::internal)?;
-    probe_with(p, ctx, &wire, Limits::STANDARD, cancel).await
+    probe_with(p, ctx, &wire, Limits::STANDARD, cancel, stages).await
 }
 
 /// [`check_profile_verdict`] with the connection maker and the timing given (test seam).
@@ -296,21 +309,26 @@ pub(crate) async fn probe_with(
     wire: &Wire,
     limits: Limits,
     cancel: &CancellationToken,
+    stages: &Stages,
 ) -> AppResult<KeyCheck> {
     // Before the handshake budget: a refused key makes no handshake, so it spends no slot.
     let decision = select_engine(p, ctx.engine_pref);
     if let Some(err) = unprobed(&decision) {
         return Err(err);
     }
-    if let Decision::Rejected(reject) = decision {
-        return Ok(refused(reject));
-    }
+    let engine = match decision {
+        Decision::Selected { engine, .. } => engine,
+        Decision::Rejected(reject) => return Ok(told(stages, refused(reject), None)),
+    };
     let endpoint = Endpoint::of(p);
     if let Some(endpoint) = &endpoint {
+        let waiting = |wait| stages.send(KeyStage::Waiting { wait });
         discipline::budget()
-            .acquire(endpoint, KEY_WAIT, cancel)
+            .acquire_noting(endpoint, KEY_WAIT, cancel, waiting)
             .await?;
     }
+    stages.send(KeyStage::Starting { engine });
+    let starting = Instant::now();
     let udp_transport = PingTarget::of(p).udp_only;
     let probe = match start_probe_engine(p, ctx, cancel).await? {
         Started::Ready(probe) => probe,
@@ -321,11 +339,15 @@ pub(crate) async fn probe_with(
                 ..Observations::default()
             };
             let verdict = classify(&seen);
-            return Ok(KeyCheck { health, verdict });
+            return Ok(told(stages, KeyCheck { health, verdict }, None));
         }
     };
+    let engine_ms = rtt_ms(starting.elapsed());
+    stages.send(KeyStage::Requesting { engine, engine_ms });
+    let asking = Instant::now();
     let dial = Dial::Socks(probe.socks());
     let report = discipline::transfer_check(wire, dial, true, limits, cancel).await;
+    let asked_ms = rtt_ms(asking.elapsed());
     let report = match report {
         Ok(report) => report,
         Err(err) => {
@@ -333,6 +355,11 @@ pub(crate) async fn probe_with(
             return Err(err);
         }
     };
+    stages.send(KeyStage::Asked {
+        engine,
+        engine_ms,
+        asked_ms,
+    });
     let online = answered(&report);
     if !online {
         tokio::time::sleep(LOG_SETTLE).await;
@@ -383,7 +410,33 @@ pub(crate) async fn probe_with(
         engine: Some(engine),
     };
     tracing::debug!(online, verdict = ?verdict.verdict, "key probe finished");
-    Ok(KeyCheck { health, verdict })
+    let answer = answer_of(&report, online, failure, asked_ms);
+    Ok(told(stages, KeyCheck { health, verdict }, Some(answer)))
+}
+
+/// Tells the last stage of a check: `answer`, else the failure the verdict names.
+fn told(stages: &Stages, check: KeyCheck, answer: Option<KeyAnswer>) -> KeyCheck {
+    let failed = || KeyAnswer::Failed(check.health.reason.unwrap_or(HealthReason::Timeout));
+    stages.send(KeyStage::Done(answer.unwrap_or_else(failed)));
+    check
+}
+
+/// What came back through the key, in numbers: the HTTP answer and its time, how far data came
+/// before it stopped, how long nothing came, or the failure's reason.
+fn answer_of(
+    report: &TransferReport,
+    online: bool,
+    failure: Option<HealthReason>,
+    waited_ms: u32,
+) -> KeyAnswer {
+    if let (true, Some(status), Some(ms)) = (online, report.status, report.answer_ms) {
+        return KeyAnswer::Http { status, ms };
+    }
+    match (&report.transfer, failure) {
+        (Transfer::Stalled { bytes }, _) => KeyAnswer::Stalled { bytes: *bytes },
+        (_, Some(HealthReason::Timeout) | None) => KeyAnswer::Silent { ms: waited_ms },
+        (_, Some(reason)) => KeyAnswer::Failed(reason),
+    }
 }
 
 /// The tunnel works end to end: the whole transfer came, or the destination answered with an

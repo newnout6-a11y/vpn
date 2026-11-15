@@ -25,6 +25,8 @@ use super::{Shared, verdict};
 /// Display facts of a row that need its decrypted profile or its stored evidence.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(super) struct RowExtras {
+    /// [`key_tag`] of the row's key.
+    pub key_tag: u64,
     pub exit_ip: Option<IpAddr>,
     pub last_seen_at: Option<UnixMs>,
     pub stealth: Option<ui::Stealth>,
@@ -52,6 +54,7 @@ impl RowExtras {
             .as_ref()
             .map(|p| engine_plan(p, server_pref(setting, row.engine)));
         Self {
+            key_tag: key_tag(profile.as_ref().map(Profile::identity)),
             exit_ip: exit_ip(row),
             last_seen_at: row.last_seen_at,
             stealth: profile
@@ -73,6 +76,16 @@ impl RowExtras {
             whitelist: whitelist(row),
         }
     }
+}
+
+/// The page's digest of a key identity (0: the key cannot be opened here): the first 8 bytes of
+/// the identity, itself a SHA-256 digest, so the page tells keys apart and learns nothing of them.
+pub(super) fn key_tag(identity: Option<[u8; 16]>) -> u64 {
+    identity.map_or(0, |id| {
+        let mut head = [0; 8];
+        head.copy_from_slice(&id[..8]);
+        u64::from_le_bytes(head)
+    })
 }
 
 /// The row's whitelist badge: the user's mark, or when it last carried data on a whitelisted
@@ -208,6 +221,7 @@ fn server(
 ) -> ui::ServerView {
     ui::ServerView {
         id: s.id.to_string(),
+        key_tag: x.key_tag,
         name: s.name.clone(),
         protocol: s.protocol.clone(),
         host: s.server.clone(),

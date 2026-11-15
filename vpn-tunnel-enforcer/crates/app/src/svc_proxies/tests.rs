@@ -167,6 +167,43 @@ async fn an_unknown_group_is_not_found() {
         AppError::from(HealthError::GroupNotFoundOrEmpty).kind
     );
 }
+/// The control API's group check shares the one resource of every check of the servers: it is
+/// refused while the Servers page's check runs, so no key is dialled by two checks at once
+/// (p-fix-checklive a1, its leftover in this module).
+#[tokio::test]
+async fn a_group_check_waits_for_the_servers_page_check() {
+    let r = rig("shared");
+    let id = add(&r.servers, KEY_A, ClientDevice::default());
+    let group = r.servers.read(|doc| {
+        let row = doc.profiles.iter().find(|row| row.id == id).expect("row");
+        row.group_id.to_string()
+    });
+    let release = CancellationToken::new();
+    let (ops, hold) = (r.source.ops.clone(), release.clone());
+    let held = tokio::spawn(async move {
+        let opts = vpnte_core::ops::RunOpts {
+            resource: Some(crate::api_servers::CHECK_RESOURCE.into()),
+            ..vpnte_core::ops::RunOpts::default()
+        };
+        ops.run(
+            vpnte_core::ops::FeatureKind::HealthCheck,
+            opts,
+            |_| async move {
+                hold.cancelled().await;
+                Ok(())
+            },
+        )
+        .await
+    });
+    while !r.source.ops.is_busy(crate::api_servers::CHECK_RESOURCE) {
+        tokio::task::yield_now().await;
+    }
+    let err = r.source.check_group_health(&group).await.unwrap_err();
+    assert_eq!(err.msg.map(|m| m.key).as_deref(), Some("core.ops.busy"));
+    release.cancel();
+    held.await.expect("holder").expect("held run");
+}
+
 /// Waits (≤ 5 s) for the control server's endpoint file and returns its port.
 async fn control_port(dir: &Path) -> u16 {
     for _ in 0..100 {

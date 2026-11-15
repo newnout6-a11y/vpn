@@ -9,6 +9,10 @@ mod actions;
 mod add;
 mod api;
 mod batch;
+mod check;
+mod check_model;
+#[cfg(test)]
+mod check_tests;
 mod demo;
 mod demo_data;
 mod detail;
@@ -37,7 +41,8 @@ mod verdict;
 
 /// The first-run wizard offers the same HWID retry as the add dialog (p-follow3).
 pub(crate) use add::NEEDS_HWID;
-pub use api::{ServersApi, use_servers_api};
+pub use api::{CheckWatch, ServersApi, use_servers_api};
+pub use check_model::*;
 pub use demo::{DemoScene, DemoServersApi};
 pub use links::LinkHandoff;
 pub use links_model::*;

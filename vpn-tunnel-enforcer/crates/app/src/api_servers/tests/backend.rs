@@ -52,9 +52,23 @@ pub(super) struct FakeTunnel {
     evidence: watch::Sender<IpEvidence>,
     traffic: watch::Sender<TrafficStats>,
     cancel: Notify,
+    /// The probe engines (sing-box, Xray) once a test asks for real probes; none by default.
+    engines: OnceLock<(PathBuf, PathBuf)>,
 }
 
 impl FakeTunnel {
+    /// Key checks start the bundled engines (loopback test servers only); `false` when they
+    /// are not bundled here.
+    pub fn use_engines(&self) -> bool {
+        let resources = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources"));
+        let engines = (resources.join("sing-box.exe"), resources.join("xray.exe"));
+        if !engines.0.exists() {
+            return false;
+        }
+        assert!(self.engines.set(engines).is_ok(), "engines are set once");
+        true
+    }
+
     /// Pretends our tunnel runs on `id`.
     pub fn connect_to(&self, id: &str) {
         self.session.send_replace(Some(SessionView {
@@ -164,9 +178,10 @@ impl TunnelOps for FakeTunnel {
         Ok(ids.into_iter().map(|id| (id, Some(sample))).collect())
     }
     fn probe_ctx(&self, device: ClientDevice) -> ProbeCtx {
+        let (singbox_exe, xray_exe) = self.engines.get().cloned().unwrap_or_default();
         ProbeCtx {
-            singbox_exe: PathBuf::new(),
-            xray_exe: PathBuf::new(),
+            singbox_exe,
+            xray_exe,
             engine_pref: EnginePref::Auto,
             device,
             net: NetPath::default(),
@@ -215,6 +230,7 @@ impl Env {
             evidence: watch::Sender::new(IpEvidence::default()),
             traffic: watch::Sender::new(TrafficStats::default()),
             cancel: Notify::new(),
+            engines: OnceLock::new(),
         });
         let backend = Backend {
             lock: dirs.lock().unwrap(),

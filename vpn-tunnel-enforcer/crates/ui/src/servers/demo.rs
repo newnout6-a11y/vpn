@@ -14,6 +14,7 @@ use super::live_model::*;
 use super::model::*;
 
 mod backend;
+mod check;
 mod links;
 mod live;
 

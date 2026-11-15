@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use vpnte_base::ErrorKind;
 use vpnte_base::types::ClientDevice;
 use vpnte_ui::servers::{
-    AddTarget, ArchiveReason, CountryCheck, LiveMode, SelectOutcome, ServersApi,
+    AddTarget, ArchiveReason, CheckWatch, CountryCheck, LiveMode, SelectOutcome, ServersApi,
     SubscriptionRequest,
 };
 
@@ -83,7 +83,14 @@ async fn the_page_works_over_a_real_list() {
             .unwrap();
     }
     let (results, mut landed) = mpsc::unbounded_channel();
-    let err = api.check_all_health(results).await.unwrap_err();
+    let stages = mpsc::unbounded_channel().0;
+    let stop = CancellationToken::new();
+    let watch = CheckWatch {
+        results,
+        stages,
+        stop,
+    };
+    let err = api.check_all_health_watched(watch).await.unwrap_err();
     let key = err.user_msg().key;
     assert!(
         [
@@ -152,8 +159,12 @@ async fn the_page_works_over_a_real_list() {
     let err = api.check_group_health("gone").await.unwrap_err();
     assert_eq!(err.user_msg().key, "servers.group.notFound");
     // p-small (RU-2026 item 6): the list-wide check has nothing left either.
-    let (results, _keep) = mpsc::unbounded_channel();
-    let err = api.check_all_health(results).await.unwrap_err();
+    let watch = CheckWatch {
+        results: mpsc::unbounded_channel().0,
+        stages: mpsc::unbounded_channel().0,
+        stop: CancellationToken::new(),
+    };
+    let err = api.check_all_health_watched(watch).await.unwrap_err();
     assert_eq!(err.user_msg().key, "app.servers.nothingToCheck");
 }
 

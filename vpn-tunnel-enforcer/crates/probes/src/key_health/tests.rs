@@ -37,6 +37,11 @@ fn ctx(pref: EnginePref) -> Option<ProbeCtx> {
     exe.exists().then_some(ctx)
 }
 
+/// A probe outside a list: nobody hears its stages.
+fn no_stages() -> Stages {
+    Stages::default()
+}
+
 fn hy2_classify(log: &str, err: &str) -> HealthReason {
     classify_failure(true, log, err)
 }
@@ -459,7 +464,7 @@ async fn engine_refusal_is_an_engine_verdict() {
     .unwrap();
     let cancel = CancellationToken::new();
     for (p, pref) in [(xhttp, EnginePref::SingBox), (tuic, EnginePref::Xray)] {
-        let check = probe_with(&p, &ctx(pref), &Wire::plain(), FAST, &cancel)
+        let check = probe_with(&p, &ctx(pref), &Wire::plain(), FAST, &cancel, &no_stages())
             .await
             .expect("a verdict, not a setup error");
         assert!(!check.health.online);
@@ -482,7 +487,7 @@ async fn probe_far_side(
 ) -> AppResult<KeyCheck> {
     let (inbound, task) = far_side(answers).await;
     let socks = parse_uri(&format!("socks://127.0.0.1:{}#S", inbound.port)).unwrap();
-    let out = probe_with(&socks, ctx, &Wire::plain(), FAST, cancel).await;
+    let out = probe_with(&socks, ctx, &Wire::plain(), FAST, cancel, &no_stages()).await;
     task.abort();
     out
 }
@@ -714,9 +719,16 @@ async fn amneziawg_is_not_checked_rather_than_an_engine_verdict() {
     let awg = vpnte_profiles::wg_ini::parse_wg_ini(conf).unwrap().unwrap();
     let cancel = CancellationToken::new();
     for pref in [EnginePref::Auto, EnginePref::SingBox, EnginePref::Xray] {
-        let err = probe_with(&awg, &ctx(pref), &Wire::plain(), FAST, &cancel)
-            .await
-            .expect_err("not checked");
+        let err = probe_with(
+            &awg,
+            &ctx(pref),
+            &Wire::plain(),
+            FAST,
+            &cancel,
+            &no_stages(),
+        )
+        .await
+        .expect_err("not checked");
         assert_eq!(err.kind, vpnte_base::ErrorKind::Validation);
         let key = err.user_msg().key.into_owned();
         assert_ne!(key, HealthReason::EngineSetting.msg().key);

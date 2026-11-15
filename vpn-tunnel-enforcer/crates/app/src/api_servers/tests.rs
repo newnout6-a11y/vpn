@@ -26,6 +26,7 @@ mod flows;
 mod phones;
 mod relays;
 mod reports;
+mod stops;
 mod tricks;
 mod verdicts;
 
@@ -230,6 +231,7 @@ fn projection_maps_rows_and_groups() {
     let extras = HashMap::from([(
         ProfileId::from("a"),
         RowExtras {
+            key_tag: 0x5eed,
             exit_ip: Some(exit),
             last_seen_at: Some(3),
             stealth: Some(ui::Stealth::Reality),
@@ -252,6 +254,11 @@ fn projection_maps_rows_and_groups() {
         panic!("three rows: {:?}", view.servers);
     };
     assert_eq!(a.resolved_ip, Some(resolved));
+    assert_eq!(
+        (a.key_tag, b.key_tag),
+        (0x5eed, 0),
+        "the key's tag for the checks"
+    );
     assert_eq!(
         (a.exit_ip, a.last_seen_in_subscription_at),
         (Some(exit), Some(3))

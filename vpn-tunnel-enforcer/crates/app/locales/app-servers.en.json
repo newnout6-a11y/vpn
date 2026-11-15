@@ -4,6 +4,7 @@
       "liveUnavailable": "Live server checks are not available in this build.",
       "proxiesUnavailable": "External proxies are not available in this build.",
       "nothingToCheck": "There are no servers to check.",
+      "checkRunning": "The servers are already being checked, one check at a time.",
       "probe": {
         "privateTarget": "The server address is local or private, so it is not probed."
       },

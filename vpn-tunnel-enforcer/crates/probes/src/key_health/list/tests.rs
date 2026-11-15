@@ -8,12 +8,14 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use vpnte_base::types::Engine;
 use vpnte_base::{AppError, AppResult, ErrorKind};
 use vpnte_profiles::model::Profile;
 use vpnte_profiles::uri::parse_uri;
 
 use super::*;
 use crate::discipline::FREEZE_BACKOFF;
+use crate::key_health::KEY_WAIT;
 
 /// A server name no other test uses (the budget is process-wide).
 fn name(tag: &str) -> String {
@@ -59,20 +61,17 @@ impl Seen {
     }
 }
 
+/// What a fake probe answers.
+type Probed = std::pin::Pin<Box<dyn Future<Output = AppResult<KeyCheck>> + Send>>;
+
 /// A probe that takes `secs(id)` and fails the keys in `fail`.
 fn probe(
     seen: &Arc<Seen>,
     secs: impl Fn(&str) -> u64 + Send + Sync,
     fail: &'static [&'static str],
-) -> impl Fn(
-    &String,
-    Profile,
-    CancellationToken,
-) -> std::pin::Pin<Box<dyn Future<Output = AppResult<KeyCheck>> + Send>>
-+ Send
-+ Sync {
+) -> impl Fn(&String, Profile, CancellationToken, Stages) -> Probed + Send + Sync {
     let seen = seen.clone();
-    move |_: &String, p: Profile, _cancel| {
+    move |_: &String, p: Profile, _cancel, _stages| {
         let id = p.name.clone();
         let sni = p
             .tls
@@ -234,7 +233,11 @@ async fn ready_names_go_first_and_held_ones_say_they_wait() {
         until,
         &CancellationToken::new(),
         |_, _| {},
-        |k: &String, wait| waits.lock().push((k.clone(), wait)),
+        |k: &String, stage| {
+            if let KeyStage::Waiting { wait } = stage {
+                waits.lock().push((k.clone(), wait));
+            }
+        },
         probe(&seen, |_| 2, &[]),
     )
     .await;
@@ -254,4 +257,214 @@ async fn ready_names_go_first_and_held_ones_say_they_wait() {
             .iter()
             .all(|(_, w)| *w > FREEZE_BACKOFF - Duration::from_secs(1))
     );
+}
+
+/// What a run told, in order: each key's stages and its result.
+#[derive(Debug, Clone, PartialEq)]
+enum Told {
+    Stage(String, KeyStage),
+    Result(String),
+}
+
+/// A probe that tells two stages of its own, one second apart.
+fn telling() -> impl Fn(&String, Profile, CancellationToken, Stages) -> Probed + Send + Sync {
+    |_: &String, _, _, stages: Stages| {
+        Box::pin(async move {
+            stages.send(KeyStage::Starting {
+                engine: Engine::SingBox,
+            });
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            stages.send(KeyStage::Done(KeyAnswer::Http {
+                status: 200,
+                ms: 40,
+            }));
+            Ok(unreadable())
+        })
+    }
+}
+
+/// p-check-live: every key is queued at once; a key whose server name is held is told the
+/// budget's own wait (the page counts it down), and the keys behind it on that name their own
+/// turn (p-fix-checklive a3: one probe later); when its wait ends it is queued again, and so is
+/// the next key at its turn; a probe's stages all come before its result.
+#[tokio::test(start_paused = true)]
+async fn a_waiting_key_tells_its_countdown() {
+    let (held, free) = (name("held"), name("free"));
+    budget().hold(&Endpoint::server_name(&held), FREEZE_BACKOFF);
+    let items = vec![key("h1", &held), key("f1", &free), key("h2", &held)];
+    let told = Mutex::new(Vec::new());
+    let until = Instant::now() + Duration::from_secs(3600);
+    run_chains(
+        items,
+        until,
+        &CancellationToken::new(),
+        |k: &String, _: &KeyCheck| told.lock().push(Told::Result(k.clone())),
+        |k: &String, stage| told.lock().push(Told::Stage(k.clone(), stage)),
+        telling(),
+    )
+    .await;
+    let told = told.into_inner();
+    let of = |id: &str| -> Vec<Told> {
+        let mine = |t: &&Told| matches!(t, Told::Stage(k, _) | Told::Result(k) if k == id);
+        told.iter().filter(mine).cloned().collect()
+    };
+    let stage = |id: &str, s| Told::Stage(id.to_owned(), s);
+    let started = stage(
+        "h1",
+        KeyStage::Starting {
+            engine: Engine::SingBox,
+        },
+    );
+    let answered = KeyStage::Done(KeyAnswer::Http {
+        status: 200,
+        ms: 40,
+    });
+    let h1 = of("h1");
+    let Told::Stage(_, KeyStage::Waiting { wait }) = h1[1] else {
+        panic!("h1 waits first: {h1:?}");
+    };
+    assert!(wait > FREEZE_BACKOFF - Duration::from_secs(1) && wait <= FREEZE_BACKOFF);
+    let waiting = |id: &str| stage(id, KeyStage::Waiting { wait });
+    assert_eq!(
+        h1,
+        [
+            stage("h1", KeyStage::Queued),
+            waiting("h1"),
+            stage("h1", KeyStage::Queued),
+            started,
+            stage("h1", answered),
+            Told::Result("h1".into()),
+        ]
+    );
+    let h2 = of("h2");
+    let behind = KeyStage::Waiting {
+        wait: wait + PROBE_TIME,
+    };
+    assert_eq!(
+        h2[..3],
+        [
+            stage("h2", KeyStage::Queued),
+            stage("h2", behind),
+            stage("h2", KeyStage::Queued)
+        ]
+    );
+    assert_eq!(h2.last(), Some(&Told::Result("h2".into())));
+    let f1 = of("f1");
+    assert!(
+        !f1.iter()
+            .any(|t| matches!(t, Told::Stage(_, KeyStage::Waiting { .. }))),
+        "{f1:?}"
+    );
+}
+
+/// The probe's own wait for a slot (another check took the name's budget meanwhile) is named
+/// before it sleeps, from the budget's reservation itself.
+#[tokio::test(start_paused = true)]
+async fn the_budget_names_its_own_wait() {
+    let busy = Endpoint::server_name(&name("busy"));
+    let cancel = CancellationToken::new();
+    for _ in 0..crate::discipline::MAX_PER_WINDOW {
+        budget().acquire(&busy, KEY_WAIT, &cancel).await.unwrap();
+    }
+    let heard = Mutex::new(None);
+    let t0 = Instant::now();
+    let note = |wait| *heard.lock() = Some(wait);
+    budget()
+        .acquire_noting(&busy, KEY_WAIT, &cancel, note)
+        .await
+        .unwrap();
+    let heard = heard.into_inner().expect("the wait is named");
+    assert!(
+        heard > Duration::from_secs(55) && heard <= crate::discipline::WINDOW,
+        "{heard:?}"
+    );
+    assert!(t0.elapsed() >= heard);
+}
+
+/// A probe that takes its name's handshake slot like the real one, then runs `secs`.
+fn budgeted(secs: u64) -> impl Fn(&String, Profile, CancellationToken, Stages) -> Probed {
+    move |_: &String, p: Profile, cancel: CancellationToken, _| {
+        Box::pin(async move {
+            let endpoint = Endpoint::of(&p).expect("a named key");
+            budget().acquire(&endpoint, KEY_WAIT, &cancel).await?;
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+            Ok(unreadable())
+        })
+    }
+}
+
+/// p-fix-checklive a3: nine keys behind one name (3 a minute): each key behind the held one is
+/// told its own turn (the 7thвЂ“9th wait for the window after next), not the first held key's
+/// wait, which ran out and started again for them; every wait told holds to the second.
+#[tokio::test(start_paused = true)]
+async fn keys_behind_a_held_name_hear_their_own_turn() {
+    let shared = name("turns");
+    let items: Vec<_> = (1..=9).map(|n| key(&format!("k{n}"), &shared)).collect();
+    let t0 = Instant::now();
+    let told = Mutex::new(Vec::new());
+    let starts = Mutex::new(HashMap::new());
+    let on_stage = |k: &String, stage| {
+        if let KeyStage::Waiting { wait } = stage {
+            told.lock().push((k.clone(), Instant::now() + wait));
+        }
+    };
+    let probe = budgeted(3);
+    let check = |k: &String, p: Profile, cancel, stages| {
+        starts.lock().insert(k.clone(), Instant::now());
+        probe(k, p, cancel, stages)
+    };
+    let until = t0 + Duration::from_secs(3600);
+    let stop = CancellationToken::new();
+    let (done, _) = run_chains(items, until, &stop, |_, _| {}, on_stage, check).await;
+    assert_eq!(done.len(), 9);
+    let (told, starts) = (told.into_inner(), starts.into_inner());
+    let secs = |at: Instant| at.duration_since(t0).as_secs_f64();
+    let first = |id: &str| told.iter().find(|(k, _)| k == id).map(|(_, at)| secs(*at));
+    assert_eq!(first("k3"), None, "the first window needs no wait");
+    for (id, slot) in [("k4", 60.0), ("k6", 66.0), ("k7", 120.0), ("k9", 126.0)] {
+        let at = first(id).unwrap_or_else(|| panic!("{id} is told its turn: {told:?}"));
+        assert!((at - slot).abs() < 1.0, "{id}: told {at}, its slot {slot}");
+    }
+    for (id, at) in &told {
+        // The probe takes what the scheduler waited for (the paced dial inside it adds less
+        // than a second), so the slot it was told is when it really started.
+        let started = secs(starts[id]);
+        assert!(
+            started >= secs(*at) - 1.0 && started - secs(*at) < 4.0,
+            "{id}: {told:?}"
+        );
+    }
+}
+
+/// p-fix-checklive a5: В«РћС‚РјРµРЅРёС‚СЊВ» lands while a probe waits in the budget for a slot another
+/// check took meanwhile; the budget answers `Cancelled` in the same poll, before anything
+/// landed. A stop is no reason a key could not be checked: the run names none (psmall-a4), so
+/// the app commits and the page says the check stopped instead of showing an error.
+#[tokio::test(start_paused = true)]
+async fn a_stop_while_a_probe_waits_for_its_slot_is_no_reason() {
+    let items = vec![key("w1", &name("taken"))];
+    let waiting = |_: &String, p: Profile, cancel: CancellationToken, _| -> Probed {
+        Box::pin(async move {
+            let endpoint = Endpoint::of(&p).expect("a named key");
+            for _ in 0..crate::discipline::MAX_PER_WINDOW {
+                budget()
+                    .reserve_at(&endpoint, Instant::now(), KEY_WAIT)
+                    .expect("another check takes the window");
+            }
+            let pressed = |_| cancel.cancel();
+            budget()
+                .acquire_noting(&endpoint, KEY_WAIT, &cancel, pressed)
+                .await?;
+            Ok(unreadable())
+        })
+    };
+    let told = Mutex::new(Vec::new());
+    let on_stage = |_: &String, stage| told.lock().push(stage);
+    let stop = CancellationToken::new();
+    let until = Instant::now() + Duration::from_secs(3600);
+    let (done, unchecked) = run_chains(items, until, &stop, |_, _| {}, on_stage, waiting).await;
+    assert!(stop.is_cancelled());
+    assert!(done.is_empty(), "nothing landed");
+    assert!(unchecked.is_none(), "a stop is no reason: {unchecked:?}");
+    assert_eq!(told.into_inner().last(), Some(&KeyStage::Unchecked));
 }

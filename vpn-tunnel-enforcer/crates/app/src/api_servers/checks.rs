@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use futures_util::stream;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use vpnte_base::types::{ClientDevice, EnginePref, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::net::Route;
@@ -20,7 +20,7 @@ use vpnte_core::ops::{FeatureKind, RunOpts, Source};
 use vpnte_core::resolve::{How, resolve_host};
 use vpnte_engine::xray_config::server_pref;
 use vpnte_probes::geo::{VerifyReject, geo_routes};
-use vpnte_probes::key_health::{self, HealthError, KeyCheck};
+use vpnte_probes::key_health::{self, HealthError, KeyCheck, KeyStage};
 use vpnte_probes::ping::RESOLVE_TIMEOUT;
 use vpnte_servers::model::{
     ArchiveReason, CountrySource, GroupId, HealthRecord, ProfileId, ServerRow, VerifiedCountry,
@@ -31,12 +31,11 @@ use vpnte_ui::servers::{CountryCheck, HealthReport, KeyHealth};
 use super::project::{reason_code, same_wire};
 use super::{Shared, group_not_found, server_not_found};
 
+mod feed;
 mod fresh;
 mod list;
 
-/// The rows whose check waits for its server name's handshake budget, named before the wait
-/// (lab live-9 L9-7: the page says В«Р¶РґС‘С‚ Р»РёРјРёС‚Р° СЂСѓРєРѕРїРѕР¶Р°С‚РёР№В» instead of a silent minute).
-pub(super) type Waits = mpsc::UnboundedSender<String>;
+pub(super) use feed::Feed;
 
 /// Positive answers of the IP column are reused this long, failures for [`MISS_TTL`].
 const HIT_TTL: Duration = Duration::from_secs(5 * 60);
@@ -47,6 +46,10 @@ const RESOLVE_WIDTH: usize = 24;
 const PING_WIDTH: usize = 5;
 /// The list check's operation budget past the list deadline: room for the final commit.
 const LIST_COMMIT: Duration = Duration::from_secs(60);
+/// The one operation resource of every check of the servers: the list's, a group's, the
+/// Maintenance page's (p-fix-checklive a1). Two checks at once dialled every key twice and
+/// overwrote each other's row lines and totals; one at a time, a second start is refused.
+pub(crate) const CHECK_RESOURCE: &str = "health:servers";
 
 /// Latest address per lower-case host for the IP column (memory only).
 #[derive(Default)]
@@ -256,16 +259,17 @@ type Item = (Key, Option<vpnte_profiles::model::Profile>);
 /// probed: that is the post-trial use) as one `HealthCheck` operation the way «Проверить все»
 /// does (speed audit ops3): chains per server name, each waiting out its name's handshake
 /// budget before it takes one of the probes, so a busy name never holds a probe others could
-/// use; each result goes to `results` (and the list) as it lands. The health records and the
-/// classifier verdicts land in the list, except for rows deleted or re-keyed meanwhile. Keys
-/// left at the deadline get no result and are counted as not checked; a run that could check
-/// nothing answers the first reason (the budget's "retry in N s").
+/// use. Each key's stages and result go to `feed` as they happen (p-check-live). Any of `stops`
+/// (the page's «Отменить», the call dropped) ends the check at once without aborting the
+/// operation: what landed is recorded like a finished run's results (before, a dropped group
+/// check aborted and lost its last unsaved batch). Keys left at a stop or the deadline get no
+/// result and are counted as not checked; a run that could check nothing answers the first
+/// reason (the budget's "retry in N s").
 pub(super) async fn group_health(
     shared: Arc<Shared>,
     id: GroupId,
-    cancel: CancellationToken,
-    results: Option<mpsc::UnboundedSender<(String, KeyHealth)>>,
-    waits: Option<Waits>,
+    stops: Vec<CancellationToken>,
+    feed: Feed,
 ) -> AppResult<HealthReport> {
     let backend = shared.backend.clone();
     let rows = backend.servers.read(|doc| {
@@ -284,41 +288,10 @@ pub(super) async fn group_health(
     if rows.is_empty() {
         return Err(HealthError::GroupNotFoundOrEmpty.into());
     }
-    let submitted = rows.len();
-    let tunnel = backend.tunnel()?.clone();
-    let proven = fresh::connected(&*tunnel);
-    let saver = Arc::new(list::Saver::new(backend.servers.clone()));
     let until = tokio::time::Instant::now() + key_health::BATCH_DEADLINE;
-    let opts = RunOpts {
-        source: Source::Ui,
-        resource: Some(format!("health:{id}").into()),
-        cancel: Some(cancel),
-        timeout: Some(key_health::BATCH_DEADLINE + LIST_COMMIT),
-        ..RunOpts::default()
-    };
-    let checked = backend
-        .ops
-        .run(FeatureKind::HealthCheck, opts, move |lease| async move {
-            let (groups, credited) = fresh::credit(probe_groups(&tunnel, rows), proven.as_ref());
-            let report = |key: &Key, check: &KeyCheck| {
-                if let Some(results) = &results {
-                    let _ = results.send((key.0.to_string(), key_health_view(&check.health)));
-                }
-                saver.add(key, check);
-            };
-            credited.iter().for_each(|(key, check)| report(key, check));
-            let wait = |key: &Key, _: Duration| notify_wait(waits.as_ref(), key);
-            let token = lease.token();
-            let found = key_health::check_list(groups, until, token, report, wait).await;
-            let done = fresh::answer(credited, found)?;
-            lease.commit(|| {
-                saver.finish()?;
-                Ok(done)
-            })
-        })
-        .await?;
-    shared.publish();
-    Ok(health_report(&checked, submitted))
+    // Past the run's own deadline: the run ends by itself first and still commits.
+    let budget = key_health::BATCH_DEADLINE + LIST_COMMIT;
+    run_checks(&shared, rows, (until, budget), stops, feed).await
 }
 
 /// The rows' probe contexts: one per client device and engine choice (the row's own engine
@@ -338,17 +311,15 @@ fn probe_groups(
 
 /// The list-wide check (RU-2026 item 6): every key the user has not removed, through its own
 /// server ([`key_health::check_list`]: chains per server name under the handshake budget), each
-/// result sent to the page as it lands. One `HealthCheck` operation that `stop` does not abort:
-/// a stop (the page dropped the call) or the list deadline keeps what finished, and that is
-/// recorded like a group check's results.
+/// key's stages and result sent to the page as they happen (p-check-live). One `HealthCheck`
+/// operation that a stop (any of `stops`: «Отменить», the call dropped) does not abort: a stop
+/// or the list deadline keeps what finished, and that is recorded like a group check's results.
 pub(super) async fn list_health(
     shared: Arc<Shared>,
-    results: mpsc::UnboundedSender<(String, KeyHealth)>,
-    waits: Option<Waits>,
-    stop: CancellationToken,
+    stops: Vec<CancellationToken>,
+    feed: Feed,
 ) -> AppResult<HealthReport> {
-    let backend = shared.backend.clone();
-    let rows = backend.servers.read(|doc| {
+    let rows = shared.backend.servers.read(|doc| {
         (doc.profiles.iter())
             .filter(|r| !r.archived_for(ArchiveReason::User) && !r.is_placeholder())
             .cloned()
@@ -357,30 +328,53 @@ pub(super) async fn list_health(
     if rows.is_empty() {
         return Err(AppError::validation(Msg::new("app.servers.nothingToCheck")));
     }
+    let until = tokio::time::Instant::now() + key_health::LIST_DEADLINE;
+    let budget = key_health::LIST_DEADLINE + LIST_COMMIT;
+    run_checks(&shared, rows, (until, budget), stops, feed).await
+}
+
+/// One key check over `rows` as a `HealthCheck` operation on [`CHECK_RESOURCE`] (until `until`,
+/// the operation's budget past it): the session's own server credited, every group at once
+/// behind the one probe limit (psmall-a1/b5), results stored as they land and at the end. While
+/// another check of the servers runs, it is refused with a calm reason.
+async fn run_checks(
+    shared: &Arc<Shared>,
+    rows: Vec<ServerRow>,
+    (until, budget): (tokio::time::Instant, Duration),
+    stops: Vec<CancellationToken>,
+    feed: Feed,
+) -> AppResult<HealthReport> {
+    let backend = shared.backend.clone();
     let submitted = rows.len();
     let tunnel = backend.tunnel()?.clone();
     let proven = fresh::connected(&*tunnel);
     let saver = Arc::new(list::Saver::new(backend.servers.clone()));
-    let until = tokio::time::Instant::now() + key_health::LIST_DEADLINE;
+    feed.begin(rows.iter().map(|r| r.id.as_str()));
     let opts = RunOpts {
         source: Source::Ui,
-        resource: Some("health:list".into()),
-        // Past the list's own deadline: the run ends by itself first and still commits.
-        timeout: Some(key_health::LIST_DEADLINE + LIST_COMMIT),
+        resource: Some(CHECK_RESOURCE.into()),
+        timeout: Some(budget),
         ..RunOpts::default()
     };
     let checked = backend
         .ops
         .run(FeatureKind::HealthCheck, opts, move |lease| async move {
-            // Every group at once behind the one probe limit (psmall-a1/b5).
+            // The operation's own abort (pre-emption, the app closing) stops it too.
+            let mut stops = stops;
+            stops.push(lease.token().clone());
+            let (stop, _watchers) = any_of(&stops);
             let (groups, credited) = fresh::credit(probe_groups(&tunnel, rows), proven.as_ref());
+            for (key, check) in &credited {
+                feed.credited(key, check);
+                saver.add(key, check);
+            }
             let report = |key: &Key, check: &KeyCheck| {
-                let _ = results.send((key.0.to_string(), key_health_view(&check.health)));
+                feed.result(key, check);
                 saver.add(key, check);
             };
-            credited.iter().for_each(|(key, check)| report(key, check));
-            let wait = |key: &Key, _: Duration| notify_wait(waits.as_ref(), key);
-            let found = key_health::check_list(groups, until, &stop, report, wait).await;
+            let stage = |key: &Key, stage: KeyStage| feed.stage(key, stage);
+            let found = key_health::check_list(groups, until, &stop, report, stage).await;
+            feed.finish();
             // Nothing could be checked at all: the reason, as a group check gives it (psmall-a4).
             let done = fresh::answer(credited, found)?;
             lease.commit(|| {
@@ -388,16 +382,37 @@ pub(super) async fn list_health(
                 Ok(done)
             })
         })
-        .await?;
+        .await
+        .map_err(already_checking)?;
     shared.publish();
     Ok(health_report(&checked, submitted))
 }
 
-/// Names a row whose check waits for its server name's budget (the page may be gone: ignored).
-fn notify_wait(waits: Option<&Waits>, key: &Key) {
-    if let Some(waits) = waits {
-        let _ = waits.send(key.0.to_string());
+/// The registry's "already running" for [`CHECK_RESOURCE`] in the page's words: the servers are
+/// being checked already (by this page or the Maintenance page), one check at a time.
+fn already_checking(err: AppError) -> AppError {
+    match &err.msg {
+        Some(msg) if msg.key == "core.ops.busy" => {
+            AppError::conflict(Msg::new("app.servers.checkRunning"))
+        }
+        _ => err,
     }
+}
+
+/// One stop for a check: it fires when any of `tokens` does; its watchers end with the guard
+/// (the check's end).
+fn any_of(tokens: &[CancellationToken]) -> (CancellationToken, DropGuard) {
+    let stop = CancellationToken::new();
+    for token in tokens {
+        let (token, stop) = (token.clone(), stop.clone());
+        tokio::spawn(async move {
+            tokio::select! {
+                () = token.cancelled() => stop.cancel(),
+                () = stop.cancelled() => {}
+            }
+        });
+    }
+    (stop.clone(), stop.drop_guard())
 }
 
 /// The page's report: every checked key's health, and the keys left without a result counted.

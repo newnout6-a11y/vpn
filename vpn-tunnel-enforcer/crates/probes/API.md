@@ -163,22 +163,42 @@ pub async fn check_many_verdicts<K: Send>(items: Vec<(K, Option<Profile>)>, ctx:
     cancel: &CancellationToken) -> Result<Vec<(K, KeyCheck)>, HealthError>;
 pub const LIST_DEADLINE: Duration /*20 min*/;
 pub async fn check_list<K: Send>(groups: Vec<ListGroup<K>>, until: tokio::time::Instant, stop: &CancellationToken,
-    on_result: impl Fn(&K, &KeyCheck) + Send + Sync, on_wait: impl Fn(&K, Duration) + Send + Sync) -> ListOutcome<K>;
+    on_result: impl Fn(&K, &KeyCheck) + Send + Sync, on_stage: impl Fn(&K, KeyStage) + Send + Sync) -> ListOutcome<K>;
+pub enum KeyStage { Queued, Waiting { wait: Duration }, Starting { engine: Engine },
+    Requesting { engine: Engine, engine_ms: u32 },
+    Asked { engine: Engine, engine_ms: u32, asked_ms: u32 }, Done(KeyAnswer), Unchecked }  // Copy
+pub enum KeyAnswer { Http { status: u16, ms: u32 }, Stalled { bytes: u64 }, Silent { ms: u32 },
+    Failed(HealthReason) }                                                             // Copy
 ```
-Lab live-9 L9-7: chains start in readiness order (names the budget lets through now first, the longest
-chain first; then held names, the shortest wait first), and `on_wait(key, wait)` names every key of a
-chain that must wait for its name's budget, before the wait (the page shows «ждёт лимита
-рукопожатий»; its result clears it). The app answers the connected session's own server from the
+p-check-live: `on_stage` hears every key's stages as they happen, in order and all before its
+result: `Queued` for every key at once; at each key's turn at the head of its chain, when its name
+is held, `Waiting { wait }` for it (the budget's own wait, then `Queued` again when it ends) and for
+each key behind it its own turn (p-fix-checklive a3: `HandshakeBudget::waits_in_turn`, the walk
+over the reservations those keys would take, one probe apart), `Queued` for the ones before the
+first held; the probe's own stages: `Waiting` when its `acquire` must wait (another check took the
+name's slot meanwhile), `Starting`, `Requesting` (the engine's start time), `Asked` (the request
+ended after `asked_ms`: p-fix-checklive b4, told before the log settles, the engine stops and the
+reach probe runs, so the page's counter stops there), `Done(answer)`:
+the HTTP status and the time to the first answer, the bytes before a stall, the time nothing came
+(a timeout), or the failure reason (`EngineSetting` / `NoOutbound` too); `Unchecked` for a key its
+name's budget deferred or whose probe could not start, and for the keys behind it. A stop or the
+deadline tells nothing more: keys without a result are not checked. Lab live-9 L9-7: chains start
+in readiness order (names the budget lets through now first, the longest chain first; then held
+names, the shortest wait first). The app answers the connected session's own server from the
 session (proven by its traffic) instead of spending a handshake on it (`app api_servers/checks/fresh.rs`).
 `check_list` (the list-wide check, RU-2026 item 6): keys chained per budget endpoint (one probe at a
 time, list order), each chain first waits out its endpoint's budget (`HandshakeBudget::wait_for`:
 the 3-a-minute window, the `FREEZE_BACKOFF` hold) without holding a probe, then takes one of
 `CONCURRENCY` probes; a key that cannot be checked (deferred, setup failure) ends its chain. It
-never fails: `until` or `stop` drops the probes in flight (not checked) and answers what finished;
-`on_result` sees each result as it lands (completion order). p-speed ops3: the app's group check
+never fails: `until` or `stop` drops the probes in flight (not checked; each probe engine ends with
+its owner, a kill-on-close Job of its own) and answers what finished; `on_result` sees each result
+as it lands (completion order). A stop is never the run's `unchecked` reason. p-speed ops3: the app's group check
 runs through it too (no probe ever waits for a budget while holding a slot).
 `HandshakeBudget::wait_for(&Endpoint) -> Duration` is public (p-speed F4: the app's gate answers
 "would a handshake wait now" from it; nothing is reserved).
+`HandshakeBudget::waits_in_turn(&Endpoint, n, apart) -> Vec<Option<Duration>>`: the waits of the
+next `n` handshakes going one after another at least `apart` apart (`None` before the first the
+budget holds back, the wait from now from that one on); nothing is reserved.
 One check = one budgeted handshake (`discipline::budget`, wait ≤ `KEY_WAIT`, else `Err`
 `probes.discipline.deferred`: not checked, no result in a batch), the probe engine, then ONE
 connection through it: the Cloudflare trace (exit IP / country) and a 64 KiB transfer
@@ -495,7 +515,8 @@ pub const TRANSFER_HOST: &str; pub const TRANSFER_BYTES: u64 /*64 KiB*/; pub con
 pub struct Limits { pub first_byte, pub gap, pub deadline: Duration }   // Limits::STANDARD = 10 s / 5 s / 20 s
 pub enum Transfer { Complete { bytes, ms }, Stalled { bytes }, NoData, Failed { bytes, error: String } }
 impl Transfer { pub fn frozen(&self) -> bool /* stall inside FREEZE_BAND */; pub fn complete(&self) -> bool }
-pub struct TransferReport { pub transfer: Transfer, pub trace: Option<Trace>, pub answer_ms: Option<u32> }
+pub struct TransferReport { pub transfer: Transfer, pub trace: Option<Trace>, pub answer_ms: Option<u32>,
+    pub status: Option<u16> /* the last response head's HTTP status (the transfer's, else the trace's) */ }
 pub type Trace = (Option<IpAddr>, Option<Iso2>);
 // reach probe (not budgeted): ICMP echo + one TCP connect to the server's own port, physical source
 pub enum Seen { NotRun, Answered, Refused, Silent }

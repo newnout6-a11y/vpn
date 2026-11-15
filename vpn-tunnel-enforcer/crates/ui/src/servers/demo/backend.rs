@@ -9,7 +9,7 @@ use vpnte_base::types::{ClientDevice, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 
 use super::*;
-use crate::servers::api::ServersApi;
+use crate::servers::api::{CheckWatch, ServersApi};
 use crate::servers::demo_data::{DEMO_PC_ID, demo_verdict, test_ip};
 use crate::servers::links_model::{LinkSchemes, QrCode};
 
@@ -549,35 +549,18 @@ impl ServersApi for DemoServersApi {
         })
     }
 
-    async fn check_all_health(
+    async fn check_all_health_watched(&self, watch: CheckWatch) -> AppResult<HealthReport> {
+        let keys = self.demo_keys(|s| s.archived.is_none());
+        self.staged_check(keys, watch).await
+    }
+
+    async fn check_group_health_watched(
         &self,
-        results: mpsc::UnboundedSender<(String, KeyHealth)>,
+        id: &str,
+        watch: CheckWatch,
     ) -> AppResult<HealthReport> {
-        let ids: Vec<(String, bool)> = (self.view().servers.iter())
-            .filter(|s| s.archived.is_none())
-            .map(|s| (s.id.clone(), s.ping_ms.is_some() || s.id == "se-sto"))
-            .collect();
-        let mut done = Vec::new();
-        // Five probes at a time, like the real check (its per-name budget only slows it down).
-        for chunk in ids.chunks(5) {
-            delay(1_200 + fastrand::u64(0..600)).await;
-            let now = now_ms();
-            for (id, online) in chunk {
-                let health = KeyHealth {
-                    online: *online,
-                    latency_ms: online.then(|| 300 + fastrand::u32(0..400)),
-                    reason: (!online).then_some(KeyHealthReason::AuthFailed),
-                    checked_at: now,
-                };
-                self.edit_server(id, |s| s.health = Some(health.clone()));
-                let _ = results.send((id.clone(), health.clone()));
-                done.push((id.clone(), health));
-            }
-        }
-        Ok(HealthReport {
-            results: done,
-            not_checked: 0,
-        })
+        let keys = self.demo_keys(|s| s.group_id.as_deref() == Some(id) && s.archived.is_none());
+        self.staged_check(keys, watch).await
     }
 
     async fn set_device(&self, id: &str, device: ClientDevice) -> AppResult<()> {

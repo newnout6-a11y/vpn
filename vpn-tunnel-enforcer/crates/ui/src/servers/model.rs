@@ -173,6 +173,9 @@ pub struct Archive {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ServerView {
     pub id: String,
+    /// A digest of the row's key (0 when it cannot be opened here): a key check names the key it
+    /// probed by it, so a stage or result for a key the row no longer holds is dropped.
+    pub key_tag: u64,
     pub name: String,
     /// Lower-case protocol: `vless`, `hysteria2`, `shadowsocks`, …
     pub protocol: String,

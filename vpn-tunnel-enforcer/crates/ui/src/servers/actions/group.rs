@@ -8,6 +8,7 @@ use super::*;
 use crate::lang::translate_now;
 use crate::servers::model::{FetchError, HealthReport, ImportReport, RefreshOutcome};
 use crate::servers::present::GROUP_NAME_MAX;
+use crate::servers::state::RunKey;
 use crate::widgets::UiError;
 
 impl Actions {
@@ -109,43 +110,24 @@ impl Actions {
         });
     }
 
+    /// A group's «Проверить»: like the list check (speed audit ops3), rows tell their stage as
+    /// it happens and take their results as they land (p-check-live), the group's strip sums up
+    /// with «Отменить», a toast at the end of a run that was not stopped. Nothing while another
+    /// check of the servers runs (one at a time, a1).
     pub fn check_health(&self, id: &str, name: &str) {
-        let (store, toasts, api) = (self.store, self.toasts, self.api.clone());
-        if store.busy.peek().get(id).is_some_and(|b| b.health) {
+        let (toasts, api) = (self.toasts, self.api.clone());
+        if self.store.current_run().is_some() {
             return;
         }
-        let (id, name) = (id.to_owned(), name.to_owned());
-        store.group_busy(&id, |b| b.health = true);
-        self.spawn(async move {
-            // Rows take their results as they land (speed audit ops3), the toast sums up; a row
-            // whose server name's handshake budget holds it back says so (lab live-9 L9-7).
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            let (wtx, mut wrx) = mpsc::unbounded_channel();
-            let run = api.check_group_health_watched(&id, tx, wtx);
-            futures_util::pin_mut!(run);
-            let mut waited = Vec::new();
-            let result = loop {
-                tokio::select! {
-                    result = &mut run => break result,
-                    Some((sid, health)) = rx.recv() => store.health_landed(&sid, health),
-                    Some(sid) = wrx.recv() => {
-                        store.row(&sid, |r| r.budget_wait = true);
-                        waited.push(sid);
-                    }
-                }
-            };
-            store.waits_ended(&waited);
-            store.group_busy(&id, |b| b.health = false);
-            match result {
-                Ok(report) => {
-                    let body = health_body(&report);
-                    for (sid, health) in report.results {
-                        store.health_landed(&sid, health);
-                    }
-                    toasts.info(name, Some(body));
-                }
-                Err(err) => toast_error(toasts, name, &err),
+        let (group, name) = (id.to_owned(), name.to_owned());
+        let run = RunKey::Group(group.clone());
+        let start = move |watch| async move { api.check_group_health_watched(&group, watch).await };
+        self.run_check(run, start, move |answer| match answer {
+            Some(Ok(report)) => {
+                toasts.info(name, Some(health_body(&report)));
             }
+            Some(Err(err)) => check_error(toasts, name, &err),
+            None => {}
         });
     }
 
