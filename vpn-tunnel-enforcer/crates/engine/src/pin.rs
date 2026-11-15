@@ -91,6 +91,29 @@ pub fn warm(engine: Engine, exe: &Path, elevated: bool) -> io::Result<()> {
     })
 }
 
+/// Lab live-11 L11-5: runs `engine`'s `version` command once (no config, no network), so the
+/// first start of a binary new to this Windows does not pay its first execution: the image
+/// load and Defender's first scan cost ~0.8 s of the first Tunnel connect after an install, with
+/// the pins already warm. Elevated, the files are pinned first (the command's own [`check`]); a
+/// relative path is never run (Windows would search for it). Logs «engine first run» with its ms;
+/// `true` = the engine answered.
+pub async fn first_run(engine: Engine, exe: &Path) -> bool {
+    if !exe.is_absolute() {
+        return false;
+    }
+    let started = std::time::Instant::now();
+    let ok = match engine {
+        Engine::SingBox => crate::singbox_process::engine_version(exe).await.is_ok(),
+        Engine::Xray => crate::xray_process::engine_version(exe).await.is_ok(),
+        // The lab engine runs in the lab only: nothing to warm for the field.
+        #[cfg(feature = "lab")]
+        Engine::Mihomo => return false,
+    };
+    let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    tracing::info!(?engine, ms, ok, "engine first run");
+    ok
+}
+
 /// [`warm`] for the bundled Smart RU rule sets in `dir` (the helper service's own folder);
 /// `false` = a file was refused (not remembered).
 pub fn warm_rule_sets(dir: &Path, elevated: bool) -> bool {

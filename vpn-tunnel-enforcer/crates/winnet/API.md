@@ -76,6 +76,8 @@ equals the files.
 pub const TUN_V4: Ipv4Net;            // 192.168.250.253/30 (sing-box side; gateway of the TUN)
 pub const TUN_RESOLVER_V4: Ipv4Addr;  // 192.168.250.254
 pub const TUN_V6: Ipv6Net;            // fd8b:3f2a:91c4::1/126, only when the TUN is dual-stack
+pub const TUN_PROBE_V4: Ipv4Addr;     // 192.0.2.253 (TEST-NET-1): the TUN readiness probe's target;
+                                      // sing-box's first route rule answers TCP to it as DNS
 #[derive(Copy, Eq, Hash)] pub enum Family { V4, V6 }      // Family::of(ip: IpAddr) -> Family
 pub fn is_own_tun_address(ip: IpAddr) -> bool;           // 192.168.250.x | legacy 172.19.0.x (hint only)
 

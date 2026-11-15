@@ -1,6 +1,6 @@
 //! TUN capture: sing-box's Wintun adapter with `auto_route` + `strict_route`, guarded by the WFP
 //! layer of `vpnte_winnet::wfp::Protection` (needs an elevated process).
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +14,7 @@ use vpnte_engine::singbox_config::{self, ConfigError, ConfigInputs, TunParams, T
 use vpnte_winnet::adapters::{self, OwnedTun, Release, alias, foreign_tun};
 use vpnte_winnet::wfp::{self, Protection};
 
-use super::{Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts, tun_form};
+use super::{Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts, PassProbe, tun_form};
 use crate::api::{StartRequest, TunWarning};
 
 /// The whole machine through our TUN (see the module doc).
@@ -89,14 +89,17 @@ impl Capture for TunCapture {
                 tracing::warn!(error = %e, "firewall policy unreadable: using the gvisor stack");
                 true
             });
+            let stack = if gvisor {
+                TunStack::Gvisor
+            } else {
+                TunStack::Mixed
+            };
+            #[cfg(feature = "lab")]
+            let stack = lab_stack(std::env::var(LAB_STACK).ok().as_deref(), stack);
             Ok(CapturePlan {
                 alias: Some(alias),
                 form: tun_form(settings.level, settings.leak_protection),
-                stack: if gvisor {
-                    TunStack::Gvisor
-                } else {
-                    TunStack::Mixed
-                },
+                stack,
                 mtu,
                 guard: settings.level,
                 warnings,
@@ -115,6 +118,15 @@ impl Capture for TunCapture {
 
     fn compat(&self, plan: &CapturePlan, parts: &EngineParts) -> Result<[u8; 32], ConfigError> {
         Ok(singbox_config::compat_key(&tun_inputs(plan, parts)))
+    }
+
+    fn config_excluding(
+        &self,
+        plan: &CapturePlan,
+        parts: &EngineParts,
+        servers: &[IpAddr],
+    ) -> Result<(Value, [u8; 32]), ConfigError> {
+        tun_config_excluding(plan, parts, servers)
     }
 
     async fn begin(&self, plan: &CapturePlan, session_programs: &[PathBuf]) -> AppResult<()> {
@@ -220,6 +232,55 @@ impl Capture for TunCapture {
     fn guard(&self, _plan: &CapturePlan) -> KillSwitchLevel {
         self.protection.level_in_force()
     }
+
+    fn probe(&self) -> Option<PassProbe> {
+        Some(Box::pin(probe_tun()))
+    }
+}
+
+/// Any port does: the probe rule matches the address alone.
+const PROBE_PORT: u16 = 9;
+
+/// One TCP connect from our TUN address to [`adapters::TUN_PROBE_V4`], which sing-box's first
+/// route rule completes itself (`singbox_config` `probe_rule`): connected = the TUN passes packets.
+/// Bound to the TUN's own address so Windows' strong-host send can put the SYN into the TUN only,
+/// never out of a physical adapter (an on-link LAN route for TEST-NET would otherwise win). No
+/// listener, nothing dialled outside, no data sent.
+async fn probe_tun() -> bool {
+    let local = SocketAddr::from((adapters::TUN_V4.addr(), 0));
+    let target = SocketAddr::from((adapters::TUN_PROBE_V4, PROBE_PORT));
+    let Ok(socket) = tokio::net::TcpSocket::new_v4() else {
+        return false;
+    };
+    if socket.bind(local).is_err() {
+        return false;
+    }
+    match socket.connect(target).await {
+        Ok(_) => true,
+        // Only sing-box can answer a SYN bound to the TUN: an answer is an answer.
+        Err(e) => matches!(
+            e.kind(),
+            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
+        ),
+    }
+}
+
+/// Lab knob (the lab feature only, lab live-11 L11-1 (b)): the TUN stack the sandbox measures
+/// the start window with. `gvisor` completes TCP in user space (no Windows listener, no inbound
+/// accept on the fresh adapter), `mixed` is the field default.
+#[cfg(feature = "lab")]
+const LAB_STACK: &str = "VPNTE_LAB_TUN_STACK";
+
+/// The stack the lab knob names, else `chosen`.
+#[cfg(feature = "lab")]
+fn lab_stack(knob: Option<&str>, chosen: TunStack) -> TunStack {
+    let stack = match knob.map(str::trim) {
+        Some("gvisor") => TunStack::Gvisor,
+        Some("mixed") => TunStack::Mixed,
+        _ => return chosen,
+    };
+    tracing::info!(?stack, "lab: TUN stack from the knob");
+    stack
 }
 
 /// How long [`observe_settle`] watches a fresh TUN's address, and how often.
@@ -259,9 +320,18 @@ pub(crate) fn tun_config(
     plan: &CapturePlan,
     parts: &EngineParts,
 ) -> Result<(Value, [u8; 32]), ConfigError> {
+    tun_config_excluding(plan, parts, &[])
+}
+
+/// [`tun_config`] with `servers` kept out of the TUN's routes (lab live-11 L11-2).
+pub(crate) fn tun_config_excluding(
+    plan: &CapturePlan,
+    parts: &EngineParts,
+    servers: &[IpAddr],
+) -> Result<(Value, [u8; 32]), ConfigError> {
     let inputs = tun_inputs(plan, parts);
     Ok((
-        singbox_config::build(&inputs)?,
+        singbox_config::build_with_servers(&inputs, servers)?,
         singbox_config::compat_key(&inputs),
     ))
 }
@@ -280,5 +350,43 @@ fn tun_inputs(plan: &CapturePlan, parts: &EngineParts) -> ConfigInputs {
         listeners: parts.listeners.clone(),
         routing: parts.routing.clone(),
         phys_dns: parts.phys_dns.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lab live-11 L11-1: without our TUN's address on this machine the probe ends at once (its
+    /// bind fails), so its SYN can never leave through another adapter. Skipped while a session
+    /// of ours is up here: a test never probes a real TUN.
+    #[tokio::test]
+    async fn the_probe_never_leaves_without_our_tun() {
+        let ours = IpAddr::from(adapters::TUN_V4.addr());
+        let up = adapters::inventory()
+            .map(|all| all.iter().any(|a| a.addresses.iter().any(|u| u.ip == ours)))
+            .unwrap_or(true);
+        if up {
+            return;
+        }
+        let answered = tokio::time::timeout(Duration::from_secs(2), probe_tun()).await;
+        assert_eq!(answered.ok(), Some(false));
+    }
+
+    /// Lab live-11 L11-1 (b): the knob picks the stack the sandbox measures; anything else keeps
+    /// the stack the firewall check chose.
+    #[cfg(feature = "lab")]
+    #[test]
+    fn the_lab_knob_picks_the_tun_stack() {
+        assert_eq!(lab_stack(Some("gvisor"), TunStack::Mixed), TunStack::Gvisor);
+        assert_eq!(
+            lab_stack(Some(" mixed "), TunStack::Gvisor),
+            TunStack::Mixed
+        );
+        assert_eq!(
+            lab_stack(Some("system"), TunStack::Gvisor),
+            TunStack::Gvisor
+        );
+        assert_eq!(lab_stack(None, TunStack::Mixed), TunStack::Mixed);
     }
 }

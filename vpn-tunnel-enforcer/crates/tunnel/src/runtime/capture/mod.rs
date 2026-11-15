@@ -6,7 +6,7 @@
 //! (needs elevation). [`ProxyCapture`] runs the same engine behind a loopback `mixed` inbound the
 //! user-level system proxy points at (no privileges): no protection steps, `ready` = the inbound
 //! accepts. The actor serves both; [`crate::api::StartRequest::capture`] picks one per start.
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -19,13 +19,17 @@ use vpnte_engine::singbox_config::{ConfigError, Listeners, RoutingParts, TunStac
 
 use crate::api::StartRequest;
 
+mod passes;
 mod proxy;
 mod tun;
 
+#[cfg(test)]
+pub(crate) use passes::model_probe;
+pub use passes::{PROBE_BOUND, PassProbe, Passing, wait_passing};
 pub use proxy::ProxyCapture;
 pub use tun::TunCapture;
 #[cfg(test)]
-pub(crate) use tun::tun_config;
+pub(crate) use tun::{tun_config, tun_config_excluding};
 
 /// How the TUN and the WFP layer agree (review winnet-wfp D1 / D2, engine-config E-D3 / E-D4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -113,6 +117,18 @@ pub trait Capture: Send + Sync {
     fn compat(&self, plan: &CapturePlan, parts: &EngineParts) -> Result<[u8; 32], ConfigError> {
         self.config(plan, parts).map(|(_, key)| key)
     }
+    /// [`Capture::config`] with `servers` (what the upstream's own engine dials: an Xray slot's
+    /// graph) kept out of the capture's routes (lab live-11 L11-2). Like the slots, they are the
+    /// upstream's identity: the key is [`Capture::config`]'s. A capture without routes ignores
+    /// them.
+    fn config_excluding(
+        &self,
+        plan: &CapturePlan,
+        parts: &EngineParts,
+        _servers: &[IpAddr],
+    ) -> Result<(Value, [u8; 32]), ConfigError> {
+        self.config(plan, parts)
+    }
     /// Protection before any engine starts (`session_programs` = canonical paths of local-proxy
     /// owners). An error refuses the start.
     async fn begin(&self, plan: &CapturePlan, session_programs: &[PathBuf]) -> AppResult<()>;
@@ -148,6 +164,11 @@ pub trait Capture: Send + Sync {
     /// for the whole session): every other port of the start is allocated around them.
     fn ports(&self, _plan: &CapturePlan) -> Vec<u16> {
         Vec::new()
+    }
+    /// One probe through the ready capture ([`wait_passing`]); `None`: it passes packets as
+    /// soon as it is ready.
+    fn probe(&self) -> Option<PassProbe> {
+        None
     }
 }
 

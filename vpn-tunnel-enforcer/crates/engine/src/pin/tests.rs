@@ -342,3 +342,16 @@ fn warm_checks_like_a_start_and_remembers_no_refusal() {
     assert!(hold(expected).is_ok());
     HELD.lock().retain(|(held, _)| *held != path);
 }
+
+/// Lab live-11 L11-5: the first run answers for both bundled engines (their `version` command:
+/// no config, no network); a relative or missing path is never run.
+#[tokio::test]
+async fn first_run_answers_for_the_bundled_engines() {
+    assert!(!first_run(Engine::Xray, Path::new("xray.exe")).await);
+    let missing = TempDir::new("first-run").path().join("xray.exe");
+    assert!(!first_run(Engine::Xray, &missing).await);
+    if let (Some(singbox), Some(xray)) = (singbox_exe(), xray_exe()) {
+        assert!(first_run(Engine::SingBox, &singbox).await);
+        assert!(first_run(Engine::Xray, &xray).await);
+    }
+}

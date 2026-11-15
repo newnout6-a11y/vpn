@@ -974,3 +974,44 @@ async fn a_failover_without_a_fault_names_the_spent_restarts() {
     );
     assert_eq!(*siblings.committed.lock(), ["c"]);
 }
+
+/// Virtual ms from a crash of a Tunnel slot session to its recovery's `running`, when the new
+/// TUN passes packets `window` ms after it is ready.
+async fn tunnel_recovery_ms(window: u32) -> u64 {
+    let w = World::new();
+    let h = spawn(&w);
+    let mut events = h.subscribe();
+    let req = StartRequest {
+        capture: crate::api::CaptureKind::Tun,
+        ..vpn_req(XRAY_KEY, EnginePref::Xray)
+    };
+    h.start(req, CancellationToken::new()).await.unwrap();
+    drain(&mut events);
+    w.tun_passes_ms.store(window, Ordering::SeqCst);
+    let crashed = tokio::time::Instant::now();
+    w.core(0).crash();
+    until(&mut events, |e| {
+        matches!(
+            e,
+            TunnelEvent::StartFinished {
+                generation: 2,
+                ok: true
+            }
+        )
+    })
+    .await;
+    u64::try_from(crashed.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Lab live-11 L11-1: after a Tunnel recovery the screen said «Подключено» at 0.9 s and traffic
+/// came back at 2.4-2.5 s. The recovery is running only once its new TUN passes packets: the
+/// same recovery takes the TUN's 700 ms window longer (on the probe's 20 ms grid).
+#[tokio::test(start_paused = true)]
+async fn a_tunnel_recovery_runs_once_its_new_tun_passes() {
+    let quick = tunnel_recovery_ms(0).await;
+    let windowed = tunnel_recovery_ms(700).await;
+    assert!(
+        windowed.abs_diff(quick + 700) <= 20,
+        "{quick} -> {windowed}"
+    );
+}

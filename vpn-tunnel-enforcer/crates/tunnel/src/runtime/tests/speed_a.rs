@@ -462,9 +462,9 @@ async fn a_strict_tun_start_on_a_dead_server_leaves_nothing_running() {
     assert!(!h.status().borrow().running);
 }
 
-/// speed3 S3-05: one DoH warm-up per TUN start, right after sing-box is ready (its Clash API
-/// opens last); none for a Proxy start; a warm-up that never answers changes nothing of the
-/// start (option W off).
+/// speed3 S3-05: one DoH warm-up per TUN start, once the TUN passes packets (lab live-11 L11-1:
+/// before, Xray's dial for it waited out the TUN's start window); none for a Proxy start; a
+/// warm-up that never answers changes nothing of the start (option W off).
 #[tokio::test(start_paused = true)]
 async fn a_tun_start_warms_its_doh_once_and_never_waits_for_it() {
     let w = World::new();
@@ -475,7 +475,7 @@ async fn a_tun_start_warms_its_doh_once_and_never_waits_for_it() {
     let at = running_at(&w, &h, slot_req(CaptureKind::Tun)).await;
     tokio::task::yield_now().await;
     assert_eq!(w.warms.load(Ordering::SeqCst), 1);
-    assert!(w.ms("core-ready:4100") <= w.ms("warm-dns"));
+    assert!(w.ms("tun-passes") <= w.ms("warm-dns"));
     assert!(near(at, w.ms("core-ready:4100") + 10), "running at {at}");
     h.stop(crate::api::StopOptions::default()).await;
     running_at(&w, &h, slot_req(CaptureKind::Proxy)).await;
@@ -509,4 +509,67 @@ fn the_warm_up_skips_a_name_that_goes_direct() {
             "{direct}"
         );
     }
+}
+
+/// Lab live-11 L11-1: sing-box passes a fresh TUN's packets 0.6-1.0 s after its started line.
+/// «Подключено» (`running`) comes once a probe through the TUN is answered: the serial start's
+/// 900 ms plus the 700 ms window, on the probe's 20 ms grid; the DoH warm-up follows the probe.
+#[tokio::test(start_paused = true)]
+async fn a_tun_start_is_running_once_the_tun_passes_packets() {
+    let w = World::new();
+    let steps = Steps {
+        resolve: 100,
+        slot: 350,
+        proof: 300,
+        core: 150,
+        capture: 0,
+    };
+    steps.on(&w);
+    w.tun_passes_ms.store(700, Ordering::SeqCst);
+    let h = TunnelHandle::spawn(budget_deps(&w));
+    let at = running_at(&w, &h, slot_req(CaptureKind::Tun)).await;
+    tokio::task::yield_now().await;
+    assert!(near(w.ms("ready"), 900), "ready at {}", w.ms("ready"));
+    assert!(near(w.ms("tun-passes"), 1600), "{}", w.ms("tun-passes"));
+    assert!(near(at, 1600), "running at {at}");
+    assert!(w.ms("warm-dns") >= w.ms("tun-passes"));
+}
+
+/// A TUN that never answers holds the start for the probe's bound (3 s) and then the start goes
+/// on as before: running, nothing compensated, no other effect.
+#[tokio::test(start_paused = true)]
+async fn a_silent_tun_delays_the_start_by_the_bound_only() {
+    let w = World::new();
+    let steps = Steps {
+        resolve: 100,
+        slot: 350,
+        proof: 300,
+        core: 150,
+        capture: 0,
+    };
+    steps.on(&w);
+    w.tun_passes_ms.store(u32::MAX, Ordering::SeqCst);
+    let h = TunnelHandle::spawn(budget_deps(&w));
+    let at = running_at(&w, &h, slot_req(CaptureKind::Tun)).await;
+    assert!(near(at, 3900), "running at {at}");
+    assert_eq!(w.count("release"), 0, "{:?}", w.log());
+    assert_eq!(w.count("terminate:4100"), 0, "{:?}", w.log());
+}
+
+/// The proxy capture passes once its inbound accepts: no probe, no wait, whatever the TUN knob.
+#[tokio::test(start_paused = true)]
+async fn a_proxy_start_has_no_tun_probe() {
+    let w = World::new();
+    let steps = Steps {
+        resolve: 100,
+        slot: 100,
+        proof: 300,
+        core: 150,
+        capture: 0,
+    };
+    steps.on(&w);
+    w.tun_passes_ms.store(u32::MAX, Ordering::SeqCst);
+    let h = TunnelHandle::spawn(budget_deps(&w));
+    let at = running_at(&w, &h, slot_req(CaptureKind::Proxy)).await;
+    assert!(near(at, 500), "running at {at}");
 }

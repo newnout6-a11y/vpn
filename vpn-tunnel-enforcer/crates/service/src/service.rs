@@ -332,7 +332,8 @@ async fn serve(
 /// install or a Windows restart finds them held (lab live-9: +654 ms before the first Xray,
 /// +254 ms before sing-box after a restart). Only the engine store's paths and the service's
 /// folder, never a client's. A refusal is logged by the check and not remembered: the start
-/// checks again. `true` = everything held.
+/// checks again. Then each held engine runs its `version` once (lab live-11 L11-5: the first
+/// execution of a new binary still cost ~0.8 s of the first connect). `true` = everything held.
 async fn warm_pins(
     exes: watch::Receiver<EngineExes>,
     dir: PathBuf,
@@ -345,17 +346,30 @@ async fn warm_pins(
     }
     let exes = exes.borrow().clone();
     let started = std::time::Instant::now();
-    let held = tokio::task::spawn_blocking(move || {
-        let singbox = pin::warm(Engine::SingBox, &exes.singbox, elevated).is_ok();
-        let xray = pin::warm(Engine::Xray, &exes.xray, elevated).is_ok();
-        let lists = pin::warm_rule_sets(&dir, elevated);
-        singbox && xray && lists
+    let pinned = exes.clone();
+    let (singbox, xray, lists) = tokio::task::spawn_blocking(move || {
+        let singbox = pin::warm(Engine::SingBox, &pinned.singbox, elevated).is_ok();
+        let xray = pin::warm(Engine::Xray, &pinned.xray, elevated).is_ok();
+        (singbox, xray, pin::warm_rule_sets(&dir, elevated))
     })
     .await
-    .unwrap_or(false);
+    .unwrap_or_default();
+    let held = singbox && xray && lists;
     let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     tracing::info!(ms, held, "engine pins warmed");
+    tokio::select! {
+        () = stop.cancelled() => {}
+        _ = first_runs(&exes, singbox, xray) => {}
+    }
     held
+}
+
+/// Lab live-11 L11-5: each engine whose files the warm-up holds runs its `version` once (a
+/// refused one is never run: the service is elevated). `(sing-box, xray)` = which answered.
+async fn first_runs(exes: &EngineExes, singbox: bool, xray: bool) -> (bool, bool) {
+    let singbox = singbox && pin::first_run(Engine::SingBox, &exes.singbox).await;
+    let xray = xray && pin::first_run(Engine::Xray, &exes.xray).await;
+    (singbox, xray)
 }
 
 /// speed3 S3-09 (a): a start keeps the names it resolved for its session (the runtime's
@@ -546,6 +560,26 @@ mod tests {
         assert!(warm_pins(relative_engines(), dir.clone(), live.clone(), false).await);
         assert!(started.elapsed() >= PIN_WARM_AFTER);
         assert!(!warm_pins(relative_engines(), dir, live, true).await);
+    }
+
+    /// Lab live-11 L11-5: only an engine the warm-up holds runs its `version` once; a relative
+    /// path never runs. The bundled engines of `resources/` answer when present (skipped quietly
+    /// without them).
+    #[tokio::test]
+    async fn only_held_engines_run_once_after_the_pins() {
+        let relative = relative_engines().borrow().clone();
+        assert_eq!(first_runs(&relative, true, true).await, (false, false));
+        let bundled = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources"));
+        let exes = EngineExes {
+            singbox: bundled.join("sing-box.exe"),
+            xray: bundled.join("xray.exe"),
+        };
+        if !(exes.singbox.is_file() && exes.xray.is_file()) {
+            return;
+        }
+        assert_eq!(first_runs(&exes, false, false).await, (false, false));
+        assert_eq!(first_runs(&exes, false, true).await, (false, true));
+        assert_eq!(first_runs(&exes, true, false).await, (true, false));
     }
 
     /// speed3 S3-09 (a): while the runtime's session runs its names stay kept; when it stops

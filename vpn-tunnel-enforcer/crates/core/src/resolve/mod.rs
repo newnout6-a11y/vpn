@@ -13,6 +13,7 @@ use vpnte_base::{AppError, ErrorKind, Msg};
 
 use crate::net::Host;
 
+mod ahead;
 mod chain;
 mod memory;
 mod server;
@@ -167,22 +168,46 @@ pub async fn resolve_server(
     server::server(&name, &keep, chain(), last_known(), os).await
 }
 
-/// speed3 S3-09 (b): the selected server's name looked up before the click over the foreign
-/// IP-literal DoH resolvers only: no name to resolve first, no SNI a filter could read, nothing
-/// to the ISP's or the OS's resolver, no Russian resolver. An address to dial (no AAAA grace).
-/// `Err`: the connect resolves as usual.
+/// speed3 S3-09 (b): a server name looked up before the click (the selected server, and since
+/// lab L11-4 the user's likely picks) over the foreign IP-literal DoH resolvers only: no name to
+/// resolve first, no SNI a filter could read, nothing to the ISP's or the OS's resolver, no
+/// Russian resolver. An address to dial (no AAAA grace). The answer is remembered for this
+/// Windows user for [`RECENT_FOR`] ([`remember`]); while it runs, a second asker of the name
+/// joins it ([`recall`]). `Err`: the connect resolves as usual.
 pub async fn resolve_ahead(name: &str) -> Result<Vec<IpAddr>, ResolveError> {
     let Host::Name(name) = Host::parse(name).map_err(|_| ResolveError::InvalidName)? else {
         // A literal needs no lookup.
         return Err(ResolveError::InvalidName);
     };
-    let foreign = UPSTREAMS
-        .into_iter()
-        .filter(chain::ip_literal_doh)
-        .collect();
-    Chain::new(foreign, Net::new(), STAGGER, UPSTREAM_LIMIT)
-        .resolve_dial(&name, &|_| true)
-        .await
+    let lookup = async {
+        let foreign = UPSTREAMS
+            .into_iter()
+            .filter(chain::ip_literal_doh)
+            .collect();
+        let found = Chain::new(foreign, Net::new(), STAGGER, UPSTREAM_LIMIT)
+            .resolve_dial(&name, &|_| true)
+            .await;
+        // Remembered before the lookup leaves the flight: no asker falls between the two.
+        if let Ok(addrs) = &found {
+            remember(&name, addrs.clone());
+        }
+        found
+    };
+    ahead::shared(session::owner(), &name, lookup).await
+}
+
+/// Lab L11-4: the answer for server name `name` this process holds without asking anyone: the
+/// running session's kept one, a recent one of this Windows user (an ended session's, a lookup
+/// ahead of the click), else what an ahead lookup of it in flight brings, joined (never asked
+/// twice). Unfiltered: the caller filters it as a looked-up answer. `None`: ask as usual.
+pub async fn recall(name: &str) -> Option<Vec<IpAddr>> {
+    let Ok(Host::Name(name)) = Host::parse(name) else {
+        return None;
+    };
+    if let Some(addrs) = session::kept(&name).or_else(|| session::recent(&name)) {
+        return Some(addrs);
+    }
+    ahead::join(session::owner().as_deref(), &name).await
 }
 
 /// An address a server may have, as every lookup here judges it (block pages, loopback,

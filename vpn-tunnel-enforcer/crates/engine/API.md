@@ -149,6 +149,14 @@ pub enum ConfigError { InvalidSlots(&'static str), InvalidListeners(&'static str
     InvalidTun(&'static str), BadUpstream(&'static str), BadRouting(String) }   // -> Internal, "engine.config.invalid"
 
 pub fn build(i: &ConfigInputs) -> Result<serde_json::Value, ConfigError>;
+pub fn build_with_servers(i: &ConfigInputs, servers: &[IpAddr])   // build + `servers` kept out of
+    -> Result<serde_json::Value, ConfigError>;                    // the TUN routes (live-11 L11-2);
+                                                                  // not in compat_key; proxy: ignored
+pub fn xray_servers(graph: &ProxyGraph) -> Vec<IpAddr>;  // IP literals an Xray slot dials itself
+    // (after `substitute`): vless/vmess/trojan/shadowsocks/hysteria/wireguard/socks/http servers,
+    // XHTTP download, WireGuard peers; selected first, unique; chained hops (proxySettings,
+    // sockopt.dialerProxy), `dns` outbounds and names skipped; at most MAX_XRAY_SERVERS
+pub const MAX_XRAY_SERVERS: usize;                 // 16: each /32 adds up to 31 TUN routes
 pub fn select_mtu(stealth: bool, adaptive: AdaptiveMode, public_wifi: bool) -> u16; // 1280 | 1380 | 1500
 pub fn compat_key(i: &ConfigInputs) -> [u8; 32];   // equal keys: a running config can serve the new
                                                    // upstream (ignores profile, slots, listener ports,
@@ -166,7 +174,9 @@ Rules the caller must keep (review of the WFP / TUN design):
 - Every app-owned port (controller, direct, probe, bootstrap-in, slots, proxy capture) non-zero
   and distinct; authenticated mixed inbounds (direct, probe) always have user / password
   1..=255 bytes; secret without spaces. Keep the proxy-capture port for the whole session.
-- Generated route order: loopback inbounds -> `routing.process_rules` -> QUIC reject (when
+- Generated route order: (TUN only) the readiness probe `{inbound tun-in, network tcp, ip_cidr
+  TUN_PROBE_V4/32, action hijack-dns}` (live-11 L11-1: sing-box completes the probe's handshake
+  itself and serves it as DNS over TCP; no outbound) -> loopback inbounds -> `routing.process_rules` -> QUIC reject (when
   `udp.block_quic`) -> IPv6 reject (dual-stack TUN, always in proxy form) -> sniff -> hijack-dns
   (TUN only) -> private direct -> all-UDP drop (when `!udp.udp`) -> STUN pins (sniffed `stun`,
   then UDP 3478 / 3479 / 5349 / 19302-19309, routing-dns B-X-1) -> `routing.domain_rules`;
@@ -194,8 +204,14 @@ Rules the caller must keep (review of the WFP / TUN design):
   mode off and sing-box then refuses them. `strategy: ipv4_only`; TUN configs add `optimistic: {enabled: true, timeout: "1h"}` (speed3
   S3-13 (a): memory only, never `cache_file`). Clash API on
   `127.0.0.1:clash_port` with `clash_secret`.
-- Upstream server IPs are excluded from the TUN routes (Native); slot mode excludes nothing:
-  pass the Xray exe in `RoutingInputs::engine_paths` (process rule -> direct) instead.
+- Upstream server IPs are excluded from the TUN routes (Native); slot mode excludes what the
+  caller passes to `build_with_servers` (the starting slot's `xray_servers`, live-11 L11-2) and
+  still needs the Xray exe in `RoutingInputs::engine_paths` (process rule -> direct) for the rest:
+  a switch keeps the running config (the new slot's servers go through the TUN by that rule, the
+  old slot's stay excluded until sing-box restarts), names Xray resolves itself, servers past the
+  bound.
+- sing-box 1.14.4 `check` decodes a rule whose action is not `route` leniently (unknown keys
+  pass); only a `route` rule is decoded strictly (`check.rs` `the_probe_rules_keys_are_real_rule_keys`).
 
 ```rust
 // Tunnel start, native sing-box upstream (sketch; errors convert into AppError with `?`).
@@ -321,11 +337,16 @@ notStarted}`, `engine.process.{configRejected, stopUnconfirmed, spawnFailed}(eng
 ```rust
 pub fn warm(engine: Engine, exe: &Path, elevated: bool) -> io::Result<()>; // the start's check, done ahead
 pub fn warm_rule_sets(dir: &Path, elevated: bool) -> bool;                // the pinned Smart RU sets
+pub async fn first_run(engine: Engine, exe: &Path) -> bool; // live-11 L11-5: `exe version` once
+    // (no config, no network; pin-checked when elevated; absolute paths only), so the first start
+    // does not pay the first execution (image load, Defender's first scan); logs «engine first run»
 ```
 The helper service calls both on its blocking pool ~10 s after «service running» for the engine
 store's current files and its own folder: the first connect then finds them hashed and held (a
 start that meets the warm-up waits for it: one hashing pass at a time). Unelevated nothing is
-checked; a refusal is logged and not remembered (the start checks again).
+checked; a refusal is logged and not remembered (the start checks again). Then each held engine
+runs `first_run` (the service); the app runs `first_run` for its own engines ~10 s after its
+start unless a session is up.
 
 ## `clash_api` — controller of one sing-box run
 

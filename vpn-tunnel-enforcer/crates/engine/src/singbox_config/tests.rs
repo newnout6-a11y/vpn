@@ -234,6 +234,30 @@ fn log_and_tun_basics() {
     assert!(c.get("experimental").unwrap().get("cache_file").is_none());
 }
 
+/// Lab live-11 L11-1: a TUN config starts with the readiness probe (TCP to the TEST-NET probe
+/// address from the TUN, answered by sing-box's own DNS server), before every rule that could
+/// route the probe somewhere; the proxy form has no TUN and no probe.
+#[test]
+fn a_tun_config_rejects_the_readiness_probe_first() {
+    let mut i = inputs(native(&vless("1.2.3.4", None)));
+    i.routing.process_rules = vec![json!({ "process_path_regex": [".*"], "outbound": DIRECT_OUT })];
+    let c = build(&i).unwrap();
+    assert_eq!(
+        rules(&c)[0],
+        json!({
+            "inbound": TUN_IN, "network": "tcp", "ip_cidr": ["192.0.2.253/32"],
+            "action": "hijack-dns",
+        })
+    );
+    let excluded = tun_in(&c)["route_exclude_address"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(!excluded.iter().any(|e| e == "192.0.2.253/32"));
+    let proxied = build(&super::proxy_tests::proxied(i)).unwrap();
+    assert!(!rules(&proxied).iter().any(|r| r["ip_cidr"].is_array()));
+}
+
 /// E-D4: the IPv4-only TUN has no IPv6 address, routes, excludes or IPv6 reject rule.
 #[test]
 fn ipv4_only_tun() {
@@ -650,8 +674,9 @@ fn inbound_rules_and_exclusions() {
     let c = build(&inputs(native(&vless("1.2.3.4", None)))).unwrap();
     let direct = json!({ "inbound": DIRECT_IN, "outbound": DIRECT_OUT });
     let probe = json!({ "inbound": PROBE_IN, "outbound": PROXY_OUT });
-    assert_eq!(index_of(&c, &direct), Some(0));
-    assert_eq!(index_of(&c, &probe), Some(1));
+    // 0: the TUN readiness probe.
+    assert_eq!(index_of(&c, &direct), Some(1));
+    assert_eq!(index_of(&c, &probe), Some(2));
     let excluded = tun_in(&c)["route_exclude_address"].as_array().unwrap();
     assert!(excluded.contains(&json!("127.0.0.0/8")));
     for private in ["192.168.0.0/16", "172.16.0.0/12", "10.0.0.0/8"] {
@@ -706,7 +731,11 @@ fn endpoint_exclusion() {
             .len(),
         3
     );
-    assert_eq!(rules(&c)[2], xray);
+    assert_eq!(
+        rules(&c)[3],
+        xray,
+        "after the TUN probe and two loopback rules"
+    );
 
     // An IPv6 endpoint is excluded only from a dual-stack TUN.
     let v6 = native(&vless("2001:db8::7", None));
@@ -745,9 +774,9 @@ fn routing_rules_placement() {
         Some(index_of(&c, &stun).unwrap() + 1)
     );
     assert_eq!(rules(&c).last(), Some(&domain));
-    // 0: mixed-direct-in, 1: live-check-in.
-    assert_eq!(index_of(&c, &direct_app), Some(2));
-    assert_eq!(index_of(&c, &vpn_app), Some(3));
+    // 0: the TUN readiness probe, 1: mixed-direct-in, 2: live-check-in.
+    assert_eq!(index_of(&c, &direct_app), Some(3));
+    assert_eq!(index_of(&c, &vpn_app), Some(4));
     assert!(index_of(&c, &vpn_app).unwrap() < index_of(&c, &quic_reject()).unwrap());
 }
 
@@ -1026,7 +1055,7 @@ fn dns_bootstrap_inbound() {
         json!({ "type": "direct", "tag": "dns-bootstrap-in", "listen": "127.0.0.1", "listen_port": 25556 })
     );
     assert_eq!(
-        rules(&c)[0],
+        rules(&c)[1],
         json!({ "inbound": "dns-bootstrap-in", "action": "hijack-dns" })
     );
     let dns_rules = c["dns"]["rules"].as_array().unwrap();

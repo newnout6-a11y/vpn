@@ -25,7 +25,7 @@ use vpnte_profiles::model::Profile;
 use vpnte_winnet::adapters::{TUN_V4, TUN_V6};
 
 use super::actor::{Actor, Phase, Retained, Session, SlotSession};
-use super::capture::{Capture, CapturePlan};
+use super::capture::{self, Capture, CapturePlan, PROBE_BOUND, Passing};
 use super::engines::{CoreProc, EchoFailure, Engines, WARM_NAME, echo_failure};
 use super::pin::pin_native;
 use super::spawn::Parts;
@@ -469,6 +469,15 @@ impl Actor {
         tracing::info!(ms = ms_since(step), "physical dns read");
         let planned = self.plan_upstream(req, engine.kind, op, work).await?;
         tracing::info!(ms = ms_since(step), "upstream planned");
+        let servers = match (&planned, req.capture) {
+            (Planned::Xray { graph, .. }, CaptureKind::Tun) => {
+                // Lab live-11 L11-2: Xray's own dials leave by the physical route, not the TUN.
+                let servers = vpnte_engine::singbox_config::xray_servers(graph);
+                tracing::info!(servers = servers.len(), "slot servers kept out of the tun");
+                servers
+            }
+            _ => Vec::new(),
+        };
         cancelled_if(op)?;
         let (programs, own): (Vec<PathBuf>, Vec<PathBuf>) = match &planned {
             Planned::Local { owner, .. } => (
@@ -558,22 +567,25 @@ impl Actor {
                 routing,
                 phys_dns,
                 direct_vpn: !local,
+                servers,
             };
             let step = Instant::now();
             let ready = self.spawn_ready(&parts, op, work).await?;
             tracing::info!(ms = ms_since(step), "sing-box ready");
-            if warm {
-                // S3-05: one per TUN start; option W off (owner default 5): «Подключено» never
-                // waits for it, and a dropped request would cancel the dial inside sing-box.
-                let (engines, clash) = (self.deps.engines.clone(), ready.1.clone());
-                tokio::spawn(async move { engines.warm_dns(&clash).await });
-            }
             // From here the traffic of a recovery can be read (L10-2).
             let _ = core_up.send(ready.1.clone());
             let step = Instant::now();
             let timeout = self.deps.timings.capture_ready;
             let proof = self.capture.ready(&plan, timeout, op).await?;
+            self.passes(op).await?;
             tracing::info!(ms = ms_since(step), "capture ready");
+            if warm {
+                // S3-05: one per TUN start; option W off (owner default 5): «Подключено» never
+                // waits for it, and a dropped request would cancel the dial inside sing-box.
+                // After the TUN passes (L11-1): Xray's dial for it no longer waits out the window.
+                let (engines, clash) = (self.deps.engines.clone(), ready.1.clone());
+                tokio::spawn(async move { engines.warm_dns(&clash).await });
+            }
             AppResult::Ok((ready, proof, listed_only))
         };
         let ((core, clash, listeners, compat), proof, listed_only) = match proving {
@@ -626,6 +638,24 @@ impl Actor {
             listed_only,
             exit,
         }))
+    }
+
+    /// Lab live-11 L11-1: sing-box passes a fresh TUN's packets only 0.6-1.0 s after its started
+    /// line, so the capture is ready once a probe through it is answered (the proxy capture has
+    /// no probe). Past the bound the start goes on as before: the probe never fails a start.
+    async fn passes(&self, op: &CancellationToken) -> AppResult<()> {
+        let capture = self.capture.clone();
+        match capture::wait_passing(|| capture.probe(), op).await? {
+            Passing::NoProbe => {}
+            Passing::Answered(waited) => {
+                tracing::info!(ms = waited.as_millis(), "tun passes packets");
+            }
+            Passing::Silent => {
+                let ms = PROBE_BOUND.as_millis();
+                tracing::warn!(ms, "tun passed no probe in time: going on");
+            }
+        }
+        Ok(())
     }
 
     /// Lab F-4 (p-live2): a native start is published only after traffic went through its

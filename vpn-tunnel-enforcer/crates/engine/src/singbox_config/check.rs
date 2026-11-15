@@ -159,6 +159,26 @@ fn check_refuses_broken_configs() {
     config["inbounds"][0]["gso"] = json!(true);
     assert!(singbox_check(&config).is_err());
     let mut config = build(&inputs(native(&vless("1.2.3.4", None)))).unwrap();
-    config["route"]["rules"][0]["no_such_field"] = json!(1);
+    config["route"]["rules"][1]["no_such_field"] = json!(1);
+    assert!(singbox_check(&config).is_err());
+}
+
+/// Lab live-11 L11-1: sing-box 1.14.4 decodes a rule with an action other than `route`
+/// leniently (an unknown key passes `check`), so the probe rule's matching keys are proven in a
+/// route rule, which is decoded strictly: the same keys pass, a misspelt one is refused.
+#[test]
+fn the_probe_rules_keys_are_real_rule_keys() {
+    let mut config = build(&inputs(native(&vless("1.2.3.4", None)))).unwrap();
+    if singbox_check(&config) == Ok(false) {
+        return;
+    }
+    let mut routed = super::route::probe_rule();
+    routed.as_object_mut().unwrap().remove("action");
+    routed["outbound"] = json!(DIRECT_OUT);
+    config["route"]["rules"][0] = routed.clone();
+    assert_eq!(singbox_check(&config), Ok(true));
+    let ip_cidr = routed.as_object_mut().unwrap().remove("ip_cidr").unwrap();
+    routed["ip_cidrs"] = ip_cidr;
+    config["route"]["rules"][0] = routed;
     assert!(singbox_check(&config).is_err());
 }

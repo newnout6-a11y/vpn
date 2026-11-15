@@ -50,7 +50,7 @@ pub fn owned_by(owner: impl Fn() -> Option<String> + Send + Sync + 'static) {
     let _ = OWNER.set(Box::new(owner));
 }
 
-fn owner() -> Option<String> {
+pub(super) fn owner() -> Option<String> {
     OWNER.get().map_or(Some(String::new()), |of| of())
 }
 

@@ -32,8 +32,8 @@ use vpnte_engine::xray_process::{SlotLaunch, XrayError, XrayEvent};
 use vpnte_profiles::model::Profile;
 
 use super::capture::{
-    Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts, ProxyCapture, tun_config,
-    tun_form,
+    Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts, PassProbe, ProxyCapture,
+    model_probe, tun_config, tun_config_excluding, tun_form,
 };
 use super::engines::{CoreProc, EchoFailure, Engines, HandshakeGate, Slots, echo_failed};
 use super::{InputsSource, RuntimeDeps, Timings, UserInputs};
@@ -93,6 +93,10 @@ pub struct World {
     pub core_ready_ms: AtomicU32,
     pub capture_ready_ms: AtomicU32,
     pub egress_ms: AtomicU32,
+    /// Lab live-11 L11-1: the fake TUN passes packets this long after `ready` (`u32::MAX`:
+    /// never); its probes follow `capture::model_probe` and mark `tun-passes` when answered.
+    pub tun_passes_ms: AtomicU32,
+    passes_at: Mutex<Option<tokio::time::Instant>>,
     /// The handshake gate every exit proof through a slot passes first ([`RealGate`] replays
     /// the app's budget); `None`: `budget_spent` alone answers `handshake_ready`.
     pub gate: Mutex<Option<Arc<dyn HandshakeGate>>>,
@@ -176,6 +180,8 @@ impl World {
             core_ready_ms: AtomicU32::new(0),
             capture_ready_ms: AtomicU32::new(0),
             egress_ms: AtomicU32::new(0),
+            tun_passes_ms: AtomicU32::new(0),
+            passes_at: Mutex::new(None),
             gate: Mutex::new(None),
             facts: Mutex::new(None),
             warms: AtomicU32::new(0),
@@ -663,6 +669,14 @@ impl Capture for FakeCapture {
     ) -> Result<(Value, [u8; 32]), ConfigError> {
         tun_config(plan, parts)
     }
+    fn config_excluding(
+        &self,
+        plan: &CapturePlan,
+        parts: &EngineParts,
+        servers: &[IpAddr],
+    ) -> Result<(Value, [u8; 32]), ConfigError> {
+        tun_config_excluding(plan, parts, servers)
+    }
     async fn begin(&self, _plan: &CapturePlan, programs: &[PathBuf]) -> AppResult<()> {
         self.0.note(format!("begin:{}", programs.len()));
         Ok(())
@@ -682,11 +696,22 @@ impl Capture for FakeCapture {
             let msg = Msg::new("tunnel.runtime.tunSetup.adapter");
             return Err(AppError::msg(ErrorKind::Timeout, msg));
         }
+        let after = self.0.tun_passes_ms.load(Ordering::SeqCst);
+        *self.0.passes_at.lock() = (after != u32::MAX)
+            .then(|| tokio::time::Instant::now() + Duration::from_millis(after.into()));
         Ok(CaptureProof {
             luid: Some(42),
             alias: plan.alias.clone(),
             port: None,
         })
+    }
+    fn probe(&self) -> Option<PassProbe> {
+        let (w, at) = (self.0.clone(), *self.0.passes_at.lock());
+        Some(Box::pin(async move {
+            let answered = model_probe(at).await;
+            w.mark("tun-passes");
+            answered
+        }))
     }
     async fn routes_ok(&self, _proof: &CaptureProof) -> bool {
         true

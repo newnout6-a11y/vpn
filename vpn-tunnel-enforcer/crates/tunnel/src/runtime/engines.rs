@@ -127,6 +127,24 @@ pub trait Engines: Send + Sync {
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> AppResult<IpAddr>;
+    /// Public IPv4 seen through loopback inbound `port` of the running core (`creds` when the
+    /// inbound asks for them), i.e. through the slot its selector points at; names resolve
+    /// upstream, never on the core's DoH connection a select has just cut (lab L11-3). `limit`
+    /// as `timeout` of [`Engines::egress`]; `settle`: from now, when the selected slot's balancer
+    /// will have judged its members: the second request waits for that moment instead of
+    /// joining after `limit`, and the proof never makes more than two ([`core_budget`]).
+    async fn egress_core(
+        &self,
+        port: u16,
+        creds: Option<&Creds>,
+        limit: Duration,
+        settle: Option<Duration>,
+        cancel: &CancellationToken,
+    ) -> AppResult<IpAddr> {
+        // Engines without a balancer behind them (test fakes): the plain echo through the port.
+        let _ = (creds, settle);
+        self.egress(Some(port), limit, cancel).await
+    }
     /// The local proxy answers on TCP within `limit`; returns its listener's image path.
     async fn local_proxy(&self, addr: &HostPort, limit: Duration) -> AppResult<Option<PathBuf>>;
     /// IPv4 resolvers of the physical adapters (empty when unreadable).
@@ -415,6 +433,33 @@ fn via_budget(settle: Option<Duration>) -> Budget {
     }
 }
 
+/// The services and budget of an echo through the running core (a switch's confirm, the
+/// watchdog's idle probe): `limit` per service, the next joining after it, as ever. A balanced
+/// slot that has not settled yet asks one service, again at the settle point (lab L11-3: before
+/// it the balancer may hand the second request the same silent member), with [`AFTER_SETTLE`]
+/// for that request: still two requests at most.
+pub(super) fn core_budget(limit: Duration, settle: Option<Duration>) -> (usize, Budget) {
+    match settle.filter(|at| !at.is_zero()) {
+        None => (
+            ECHO_URLS.len(),
+            Budget {
+                total: limit.saturating_mul(2),
+                hedge: limit,
+                settle: None,
+            },
+        ),
+        Some(at) => {
+            let total = limit.saturating_mul(2).max(at + AFTER_SETTLE);
+            let budget = Budget {
+                total,
+                hedge: total,
+                settle: Some(at),
+            };
+            (1, budget)
+        }
+    }
+}
+
 /// Why no address came back from the echo services: the source of their `egressUnknown` error,
 /// so a caller can tell a silent route from one that answered (audit mihomo-b3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -680,12 +725,22 @@ impl Engines for RealEngines {
         };
         // The old sequential worst case (two requests of `timeout`), without cutting a slow
         // first answer at `timeout`.
-        let budget = Budget {
-            total: timeout.saturating_mul(2),
-            hedge: timeout,
-            settle: None,
-        };
-        echo(&route, &ECHO_URLS, budget, None, cancel).await
+        let (services, budget) = core_budget(timeout, None);
+        echo(&route, &ECHO_URLS[..services], budget, None, cancel).await
+    }
+
+    async fn egress_core(
+        &self,
+        port: u16,
+        creds: Option<&Creds>,
+        limit: Duration,
+        settle: Option<Duration>,
+        cancel: &CancellationToken,
+    ) -> AppResult<IpAddr> {
+        let addr = HostPort::new("127.0.0.1", port)?;
+        let route = Route::proxy(ProxyKind::Socks5, &addr, creds);
+        let (services, budget) = core_budget(limit, settle);
+        echo(&route, &ECHO_URLS[..services], budget, None, cancel).await
     }
 
     async fn local_proxy(&self, addr: &HostPort, limit: Duration) -> AppResult<Option<PathBuf>> {
@@ -989,6 +1044,46 @@ connection: close
         assert_eq!(late.total, Duration::from_millis(10_500) + AFTER_SETTLE);
         let early = via_budget(Some(Duration::from_millis(5_500)));
         assert_eq!(early.total, EGRESS_VIA.total);
+    }
+
+    /// Lab L11-3: a switch's echo through the core to a balanced slot that has not settled asks
+    /// one service, and again at the settle point, never before it: the first pick was silent,
+    /// the second request (no more) is answered once the balancer judged its members.
+    #[tokio::test]
+    async fn a_core_echo_asks_an_unsettled_balancer_again_at_its_settle_point() {
+        let route = balanced(1).await;
+        let (services, settled) = core_budget(ms(200), Some(ms(600)));
+        assert_eq!(services, 1);
+        let after = ms(600) + AFTER_SETTLE;
+        assert_eq!((settled.hedge, settled.total), (after, after));
+        let urls: [&str; 2] = [&route, &route];
+        let started = Instant::now();
+        let ip = ask_all(&urls[..services], settled).await.unwrap();
+        assert_eq!(ip, "192.0.2.44".parse::<IpAddr>().unwrap());
+        assert!(started.elapsed() >= ms(600));
+        // Settled (or no balancer): both services within `limit` each, as before.
+        let (services, plain) = core_budget(ms(2_000), Some(Duration::ZERO));
+        assert_eq!((services, plain), (ECHO_URLS.len(), budget(4_000, 2_000)));
+        assert_eq!(
+            core_budget(ms(2_000), None),
+            (ECHO_URLS.len(), budget(4_000, 2_000))
+        );
+    }
+
+    /// A failed first request of an unsettled balanced slot starts nothing before the settle
+    /// point: two requests in all.
+    #[tokio::test]
+    async fn an_unsettled_core_echo_makes_two_requests_at_most() {
+        let (refused, hits) = service(Some((200, "not an address")), Duration::ZERO).await;
+        let (services, settled) = core_budget(ms(100), Some(ms(300)));
+        let urls: [&str; 2] = [&refused, &refused];
+        let err = ask_all(&urls[..services], settled).await.unwrap_err();
+        assert_eq!(failure(&err), Some(EchoFailure::NoAddress));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
     }
 
     /// Answers without an address end the proof at once, as "no address" (the route carries

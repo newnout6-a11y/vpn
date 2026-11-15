@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::Engine;
+use vpnte_base::types::{Engine, Loopback};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_engine::clash_api::ClashEndpoint;
 use vpnte_engine::singbox_config::{UdpPolicy, Upstream, select_mtu};
@@ -18,7 +19,7 @@ use vpnte_winnet::adapters::{TUN_V4, TUN_V6};
 
 use super::actor::{Actor, Phase, SlotSession};
 use super::capture::{Capture, CaptureProof, EngineParts};
-use super::engines::{CoreProc, EchoFailure, Engines, echo_failure};
+use super::engines::{CoreProc, EchoFailure, Engines, core_budget, echo_failed, echo_failure};
 use super::{Timings, config};
 use crate::api::{
     Mode, NameHint, Origin, OwnerCheck, Slot, StartRequest, SwitchOutcome, SwitchPhase,
@@ -65,7 +66,7 @@ struct RuntimeSwitch<'a> {
     stops_at: u64,
     timings: &'a Timings,
     /// When the staged graph's balancer has judged its members (`None`: no balancer).
-    settle: Option<std::time::Duration>,
+    settle: Option<Duration>,
     /// The candidate's proof waits for the traffic it carries after the select (the handshake
     /// budget of its server name is spent for now: speed audit F4).
     by_traffic: bool,
@@ -75,13 +76,30 @@ struct RuntimeSwitch<'a> {
     fresh: bool,
     /// speed3 S3-10 (b): the app's addresses for the candidate's names (this switch only).
     hints: Vec<NameHint>,
+    /// The core's probe inbound (`live-check-in`): the TUN's proofs after the select go through
+    /// it (lab L11-3).
+    check: Option<&'a Loopback>,
+    /// When the candidate's slot accepted: its balancer's observatory runs from about then.
+    staged_at: Option<tokio::time::Instant>,
+    /// The candidate's names answered from this process's memory (lab L11-4).
+    recalled: Vec<String>,
 }
 
 /// How long a candidate proven by its own traffic may take to show it.
-const TRAFFIC_PROOF: std::time::Duration = std::time::Duration::from_secs(3);
-const TRAFFIC_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+const TRAFFIC_PROOF: Duration = Duration::from_secs(3);
+const TRAFFIC_POLL: Duration = Duration::from_millis(250);
 /// How often a fresh candidate's own downloads are read during its one proof (loopback reads).
-const FRESH_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+const FRESH_POLL: Duration = Duration::from_millis(50);
+
+/// The pause between two reads of a candidate's downloads, `waited` into its proof: every
+/// [`FRESH_POLL`] for the first `budget`, every [`TRAFFIC_POLL`] after it.
+fn poll(waited: Duration, budget: Duration) -> Duration {
+    if waited < budget {
+        FRESH_POLL
+    } else {
+        TRAFFIC_POLL
+    }
+}
 
 impl RuntimeSwitch<'_> {
     /// Answers came back through `slot` (its own connections downloaded something).
@@ -90,46 +108,121 @@ impl RuntimeSwitch<'_> {
         carried.is_ok_and(|c| c.iter().any(|(_, down)| *down > 0))
     }
 
-    /// speed3 S3-07, the one proof of a fresh candidate selected without a probe: the selector
-    /// read `slot` back at the select; data must now come back through it within
-    /// `confirm_candidate`, with no hedge: its own downloads (the user's traffic) count first,
-    /// else the one echo through the capture. Any exit counts: no probe named one, and servers
-    /// of one provider share exits.
-    async fn confirm_fresh(&mut self, slot: EngineSlot) -> AppResult<()> {
-        let (engines, port, cancel) = (self.engines, self.proof.port, self.cancel);
-        let budget = self.timings.confirm_candidate;
-        let echo_token = cancel.child_token();
-        // The echo's own hedge would start after twice the budget: never reached.
-        let echo = engines.egress(port, budget.saturating_mul(2), &echo_token);
+    /// What is left until the candidate's balancer has judged its members (`None`: no balancer,
+    /// or judged already).
+    fn settle_left(&self) -> Option<Duration> {
+        let left = self.settle?.saturating_sub(self.staged_at?.elapsed());
+        (!left.is_zero()).then_some(left)
+    }
+
+    /// The echo through the running core to the slot its selector points at: under the proxy
+    /// capture through its mixed inbound (the way the user's programs go), under the TUN through
+    /// the core's probe inbound (`live-check-in`, always to the selector). Lab L11-3: through the
+    /// TUN the echo first looked its service's name up on the core's DoH connection, which the
+    /// select had just cut, and the service's own requests follow the user's rules there.
+    async fn echo(
+        &self,
+        limit: Duration,
+        settle: Option<Duration>,
+        token: &CancellationToken,
+    ) -> AppResult<IpAddr> {
+        let engines = self.engines;
+        match (self.proof.port, self.check) {
+            (Some(port), _) => engines.egress_core(port, None, limit, settle, token).await,
+            (None, Some(check)) => {
+                let creds = check.creds.as_ref();
+                (engines.egress_core(check.port, creds, limit, settle, token)).await
+            }
+            // No probe inbound (never in a slot run): through the capture itself.
+            (None, None) => engines.egress(None, limit, token).await,
+        }
+    }
+
+    /// Data came back through the candidate `slot` after the select, within `within`: its own
+    /// downloads (the user's traffic, read on loopback) or the echo through the core, whichever
+    /// first; an echo that got nothing back leaves the traffic the rest of the time. `Ok(None)`:
+    /// proven by its traffic; the echo's address or failure is the caller's to judge.
+    async fn data_back(
+        &self,
+        slot: EngineSlot,
+        limit: Duration,
+        settle: Option<Duration>,
+        within: Duration,
+    ) -> AppResult<Option<IpAddr>> {
+        if let Some(at) = settle {
+            // Lab L11-3: one silent member of an unjudged balancer is no dead server.
+            let ms = u64::try_from(at.as_millis()).unwrap_or(u64::MAX);
+            tracing::info!(ms, "switch: the candidate's balancer settles first");
+        }
+        let echo_token = self.cancel.child_token();
+        let echo = self.echo(limit, settle, &echo_token);
         tokio::pin!(echo);
-        let deadline = tokio::time::sleep(budget);
+        let deadline = tokio::time::sleep(within);
         tokio::pin!(deadline);
-        let mut echoed = false;
-        let proven = loop {
+        let mut silent: Option<AppError> = None;
+        let started = tokio::time::Instant::now();
+        let back = loop {
             if self.carries(slot).await {
-                tracing::info!(?slot, "switch: the fresh candidate carries traffic");
-                break Ok(());
+                if self.fresh {
+                    tracing::info!(?slot, "switch: the fresh candidate carries traffic");
+                } else {
+                    tracing::info!(?slot, "switch: the candidate carries traffic");
+                }
+                break Ok(None);
             }
             tokio::select! {
-                () = &mut deadline => break Err(unconfirmed("no answer through the fresh candidate")),
-                () = cancel.cancelled() => break Err(AppError::cancelled()),
-                seen = &mut echo, if !echoed => {
-                    echoed = true;
-                    match seen {
-                        Ok(ip) => {
-                            self.slots.egress[slot.index()] = Some(ip);
-                            break Ok(());
-                        }
-                        Err(e) if echo_failure(&e) == Some(EchoFailure::NoAddress) => break Ok(()),
-                        // Its own traffic may still prove it until the deadline.
-                        Err(e) => tracing::info!(error = %e, "switch: the fresh candidate's echo failed"),
-                    }
+                // Nothing came back, whichever deadline came first: the echo's own verdict.
+                () = &mut deadline => {
+                    break Err(silent.unwrap_or_else(|| echo_failed(EchoFailure::NoReply)));
                 }
-                () = tokio::time::sleep(FRESH_POLL) => {}
+                () = self.cancel.cancelled() => break Err(AppError::cancelled()),
+                seen = &mut echo, if silent.is_none() => match seen {
+                    Ok(ip) => break Ok(Some(ip)),
+                    // Its own traffic may still prove it until the deadline.
+                    Err(e) if echo_failure(&e) == Some(EchoFailure::NoReply) => {
+                        if self.fresh {
+                            tracing::info!(error = %e, "switch: the fresh candidate's echo failed");
+                        } else {
+                            tracing::info!(error = %e, "switch: the candidate's echo got nothing back");
+                        }
+                        silent = Some(e);
+                    }
+                    Err(e) => break Err(e),
+                },
+                // A balanced candidate's longer wait reads the connections less often.
+                () = tokio::time::sleep(poll(started.elapsed(), self.timings.confirm_candidate)) => {}
             }
         };
         echo_token.cancel();
-        proven
+        back
+    }
+
+    /// speed3 S3-07, the one proof of a fresh candidate selected without a probe: the selector
+    /// read `slot` back at the select; data must now come back through it within
+    /// `confirm_candidate` (a balanced slot not settled yet: until one request after its settle
+    /// point), with no hedge: its own downloads (the user's traffic) count first, else the one
+    /// echo through the core. Any exit counts: no probe named one, and servers of one provider
+    /// share exits.
+    async fn confirm_fresh(&mut self, slot: EngineSlot) -> AppResult<()> {
+        let budget = self.timings.confirm_candidate;
+        let settle = self.settle_left();
+        // The echo's own hedge would start after twice the budget: never reached.
+        let limit = budget.saturating_mul(2);
+        let within = match settle {
+            Some(_) => core_budget(limit, settle).1.total,
+            None => budget,
+        };
+        match self.data_back(slot, limit, settle, within).await {
+            Ok(ip) => {
+                self.slots.egress[slot.index()] = ip;
+                Ok(())
+            }
+            Err(e) if echo_failure(&e) == Some(EchoFailure::NoAddress) => Ok(()),
+            Err(e) if echo_failure(&e) == Some(EchoFailure::NoReply) => {
+                Err(unconfirmed("no answer through the fresh candidate"))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// The candidate selected without a probe of its own: answers coming back through it within
@@ -182,10 +275,13 @@ fn tunnel_exit_matches(
     }
 }
 
-/// The app's hints for `hosts` (S3-09's rules, as the start takes them): per hinted name the
-/// first address a lookup could have answered (`may_be_server`, never our TUN's networks), IPv4
-/// first; the other names are asked. A hint names its host: it never stands in for another.
-fn hinted(hosts: &[String], hints: &[NameHint]) -> (HashMap<String, IpAddr>, Vec<String>) {
+/// How long a switch's stage waits for a lookup ahead of the click already in flight (lab L11-4:
+/// 107-336 ms each) before it asks the bootstrap itself.
+const JOIN_LIMIT: Duration = Duration::from_millis(1_000);
+
+/// The address of an answer learned elsewhere that a lookup could have given (S3-09's rules:
+/// `may_be_server`, never our TUN's networks), IPv4 first.
+fn first_usable(addrs: &[IpAddr]) -> Option<IpAddr> {
     let usable = |ip: &&IpAddr| {
         let ours = match ip {
             IpAddr::V4(v4) => TUN_V4.contains(v4),
@@ -193,14 +289,49 @@ fn hinted(hosts: &[String], hints: &[NameHint]) -> (HashMap<String, IpAddr>, Vec
         };
         vpnte_core::resolve::may_be_server(**ip) && !ours
     };
+    addrs
+        .iter()
+        .filter(usable)
+        .min_by_key(|ip| ip.is_ipv6())
+        .copied()
+}
+
+/// The app's hints for `hosts` (S3-09's rules, as the start takes them): per hinted name its
+/// [`first_usable`] address; the other names are asked. A hint names its host: it never stands
+/// in for another.
+fn hinted(hosts: &[String], hints: &[NameHint]) -> (HashMap<String, IpAddr>, Vec<String>) {
     let (mut found, mut ask) = (HashMap::new(), Vec::new());
     for host in hosts {
         let hint = hints.iter().find(|h| h.name.eq_ignore_ascii_case(host));
-        match hint.and_then(|h| h.addrs.iter().filter(usable).min_by_key(|ip| ip.is_ipv6())) {
+        match hint.and_then(|h| first_usable(&h.addrs)) {
             Some(ip) => {
-                found.insert(host.clone(), *ip);
+                found.insert(host.clone(), ip);
             }
             None => ask.push(host.clone()),
+        }
+    }
+    (found, ask)
+}
+
+/// Lab L11-4: the names of `hosts` this process answers without asking anyone
+/// ([`vpnte_core::resolve::recall`]: the user's lookups ahead of the click, a recent session's
+/// names; one in flight joined for up to [`JOIN_LIMIT`]), filtered as a hint is; the rest to ask.
+async fn recalled(
+    hosts: Vec<String>,
+    cancel: &CancellationToken,
+) -> (HashMap<String, IpAddr>, Vec<String>) {
+    let (mut found, mut ask) = (HashMap::new(), Vec::new());
+    for host in hosts {
+        let recall = tokio::time::timeout(JOIN_LIMIT, vpnte_core::resolve::recall(&host));
+        let addrs = tokio::select! {
+            () = cancel.cancelled() => None,
+            got = recall => got.ok().flatten(),
+        };
+        match addrs.as_deref().and_then(first_usable) {
+            Some(ip) => {
+                found.insert(host, ip);
+            }
+            None => ask.push(host),
         }
     }
     (found, ask)
@@ -219,14 +350,18 @@ impl SwitchOps for RuntimeSwitch<'_> {
         // The TUN is up: names resolve through sing-box's bootstrap inbound, never by Xray.
         let dns = SocketAddr::from((Ipv4Addr::LOCALHOST, self.slots.dns_bootstrap));
         let step = std::time::Instant::now();
-        // speed3 S3-10 (b): a name the app's hint answers skips the bootstrap's cold direct DoH.
+        // speed3 S3-10 (b): a name the app's hint answers skips the bootstrap's cold direct DoH,
+        // and so does one this process already holds (lab L11-4).
         let (hinted, ask) = hinted(&graph.hosts(), &self.hints);
+        let (recalled, ask) = recalled(ask, cancel).await;
+        self.recalled = recalled.keys().cloned().collect();
         let mut resolved = Resolved::default();
         if !ask.is_empty() {
             let path = ResolvePath::ViaSingBox(dns);
             resolved = self.engines.resolve(&ask, path, cancel).await?;
         }
         resolved.addrs.extend(hinted);
+        resolved.addrs.extend(recalled);
         // speed3 S3-10 step lines (lab L-3: ~240 ms before «xray-b spawned» had no line).
         let (ms, asked) = (step.elapsed().as_millis(), ask.len());
         tracing::info!(ms, asked, "candidate resolved");
@@ -246,7 +381,11 @@ impl SwitchOps for RuntimeSwitch<'_> {
                 .map(|ip| SocketAddr::new(*ip, self.next.profile.port)),
         };
         tracing::info!(ms = step.elapsed().as_millis(), "candidate config built");
+        // A staged slot has no proven exit yet: an address of its last server must never be
+        // published for this one when its traffic proves it.
+        self.slots.egress[slot.index()] = None;
         self.slots.slots.start(slot, ep, launch, cancel).await?;
+        self.staged_at = Some(tokio::time::Instant::now());
         Ok(())
     }
 
@@ -301,14 +440,24 @@ impl SwitchOps for RuntimeSwitch<'_> {
         let expected = self.slots.egress[slot.index()];
         let balanced = self.slots.balanced[slot.index()] || expected.is_none();
         let expected = expected.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-        // The retained upstream gets its own short, fresh proof the caller cannot cancel.
-        let (budget, token) = if slot == self.previous {
-            (self.timings.confirm_previous, CancellationToken::new())
+        if slot == self.previous {
+            // The retained upstream gets its own short, fresh proof the caller cannot cancel.
+            let (budget, token) = (self.timings.confirm_previous, CancellationToken::new());
+            let seen = self.echo(budget, None, &token).await;
+            tunnel_exit_matches(seen, expected, balanced)?;
         } else {
-            (self.timings.confirm_candidate, self.cancel.clone())
-        };
-        let seen = self.engines.egress(self.proof.port, budget, &token).await;
-        tunnel_exit_matches(seen, expected, balanced)?;
+            // Lab L11-3: its own traffic proves it too (any exit: the selector was read back),
+            // and a balanced candidate not settled yet is asked again at its settle point.
+            let (limit, settle) = (self.timings.confirm_candidate, self.settle_left());
+            let within = core_budget(limit, settle).1.total;
+            if let Some(seen) = self
+                .data_back(slot, limit, settle, within)
+                .await
+                .transpose()
+            {
+                tunnel_exit_matches(seen, expected, balanced)?;
+            }
+        }
         let running = self.slots.slots.running(slot);
         if !proven(running, self.capture, self.proof).await {
             return Err(unconfirmed("slot or routes lost during the proof"));
@@ -480,6 +629,9 @@ impl Actor {
             by_traffic: false,
             fresh,
             hints: facts.hints,
+            check: s.listeners.probe.as_ref(),
+            staged_at: None,
+            recalled: Vec::new(),
         };
         let candidate = previous.other();
         let mut receipt = {
@@ -502,6 +654,18 @@ impl Actor {
         if receipt.previous_preserved && receipt.candidate_stopped && stage_failed {
             // Another listener may have claimed the standby port: reallocate next time.
             ops.slots.suspect = true;
+        }
+        let dial_failed = receipt.outcome == SwitchOutcome::Failed
+            && receipt.failures.iter().any(|f| {
+                matches!(
+                    f.phase,
+                    SwitchPhase::Stage | SwitchPhase::Probe | SwitchPhase::Confirm
+                )
+            });
+        if dial_failed && !ops.recalled.is_empty() {
+            // S3-09 (e): an answer from memory that did not carry the candidate goes; the next
+            // try asks the resolvers.
+            vpnte_core::resolve::drop_names(&ops.recalled);
         }
         if receipt.committed {
             s.req = next.clone();
@@ -547,7 +711,6 @@ impl Actor {
 mod confirm_tests {
     use std::net::IpAddr;
 
-    use super::super::engines::echo_failed;
     use super::*;
 
     fn ip(s: &str) -> IpAddr {

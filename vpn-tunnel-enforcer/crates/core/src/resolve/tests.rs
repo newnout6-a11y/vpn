@@ -256,3 +256,28 @@ async fn a_kept_session_name_never_leaves_the_pc() {
     assert!(!session::running());
     assert_eq!(session::kept("other.p-follow3.invalid"), None);
 }
+
+/// Lab L11-4: a name remembered for this user answers `recall` at once, a name an ahead lookup
+/// is resolving is joined (asked once), an unknown name is left to the usual lookup.
+#[tokio::test(start_paused = true)]
+async fn recall_answers_remembered_names_and_joins_those_in_flight() {
+    let _one = SESSIONS.lock().await;
+    let ip: IpAddr = "203.0.113.8".parse().expect("ip");
+    let remembered = "ahead.l11-4.invalid";
+    remember(remembered, vec![ip]);
+    assert_eq!(recall(remembered).await, Some(vec![ip]));
+    assert_eq!(recall("never.l11-4.invalid").await, None);
+    let lookup = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        Ok(vec![ip])
+    };
+    let running = ahead::shared(session::owner(), "flight.l11-4.invalid", lookup);
+    let joined = async {
+        tokio::task::yield_now().await;
+        recall("flight.l11-4.invalid").await
+    };
+    let (found, seen) = tokio::join!(running, joined);
+    assert_eq!((found, seen), (Ok(vec![ip]), Some(vec![ip])));
+    drop_names(&[remembered.to_owned()]);
+    assert_eq!(recall(remembered).await, None);
+}

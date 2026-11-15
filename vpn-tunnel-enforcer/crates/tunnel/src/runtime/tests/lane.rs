@@ -343,3 +343,24 @@ async fn a_start_that_fails_early_drops_its_inputs_snapshot() {
     h.start(req, CancellationToken::new()).await.expect("start");
     assert_eq!(w.count("inputs-done"), 1, "{:?}", w.log());
 }
+
+/// Lab live-11 L11-2: an Xray-slot TUN start keeps the server its slot dials out of the TUN's
+/// routes (Xray's own dials no longer loop through sing-box); a Proxy start has no routes.
+#[tokio::test]
+async fn an_xray_tun_start_keeps_its_slots_server_out_of_the_tun() {
+    let w = World::new();
+    let h = spawn(&w);
+    let req = StartRequest {
+        capture: crate::api::CaptureKind::Tun,
+        ..vpn_req(XRAY_KEY, vpnte_base::types::EnginePref::Xray)
+    };
+    h.start(req, CancellationToken::new()).await.expect("start");
+    let config = w.configs.lock()[0].clone();
+    let excluded = config["inbounds"][0]["route_exclude_address"].clone();
+    assert!(
+        excluded
+            .as_array()
+            .is_some_and(|l| l.contains(&serde_json::json!("203.0.113.10/32"))),
+        "{excluded}"
+    );
+}

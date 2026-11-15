@@ -476,6 +476,16 @@ pub trait Confirmations: Send + Sync { fn confirmed_within(&self, age: Duration)
     // (L9-1, review live2-a1). `bring_up` reads the inputs snapshot beside capture / upstream plan /
     // slot A and awaits it at the config (L9-2, timing line `routing inputs ready`). The exit proof
     // takes its first handshake slot before its clocks run (live2-a1): a budget wait is never NoReply.
+    // Lab live-11 L11-1 / L11-2 (p-tun-ready): `fn probe(&self) -> Option<PassProbe>` (default
+    // None) is one probe through the ready capture (TUN: a TCP connect bound to TUN_V4 to
+    // TUN_PROBE_V4:9, completed by sing-box's first route rule `hijack-dns`, nothing leaves; proxy:
+    // none), and `fn config_excluding(&self, plan, parts, servers: &[IpAddr])` (default = `config`)
+    // keeps `servers` (the starting slot's own Xray dials, at most 16) out of the TUN routes; the key
+    // is `config`'s. A TUN start reports «capture ready» (so «Подключено» and a recovery's running)
+    // only after a probe is answered: a fresh probe every 20 ms, bound 3 s; past it WARN «tun passed
+    // no probe in time: going on» and the start goes on. Step lines «tun passes packets ms=» and
+    // «slot servers kept out of the tun servers=»; the S3-05 DNS warm-up runs after the probe. Lab
+    // builds only: `VPNTE_LAB_TUN_STACK=gvisor|mixed` in the TUN host's environment picks the stack.
 pub struct CapturePlan { pub alias: Option<String> /* TUN alias, or the mixed port as text */, pub form: TunForm,
     pub stack: TunStack, pub mtu: u16, pub guard: KillSwitchLevel /* what the protection enforces */,
     pub warnings: Vec<Msg> }
@@ -525,6 +535,13 @@ pub struct ProxyCapture;  impl ProxyCapture { pub fn new() -> Self;   // + Defau
         -> AppResult<IpAddr>;   // through the tunnel: default route (TUN) or `via` = the proxy
                                 // capture's mixed port (the app's requests never use the system proxy);
                                 // `timeout` x 2 in all, the 2nd service joins after `timeout`
+    async fn egress_core(&self, port: u16, creds: Option<&Creds>, limit: Duration,
+        settle: Option<Duration>, cancel: &CancellationToken)
+        -> AppResult<IpAddr>;   // lab L11-3: through a loopback inbound of the running core (socks5h,
+                                // names resolved upstream) to the slot its selector points at; `limit`
+                                // as `egress`'s `timeout`; `settle` (from now): an unjudged balancer:
+                                // one service, asked again at the settle point, budget max(2 x limit,
+                                // settle + 8 s), two requests at most. Default: `egress(Some(port))`
     async fn local_proxy(&self, addr: &HostPort, limit: Duration) -> AppResult<Option<PathBuf>>;
     async fn physical_dns(&self) -> Vec<Ipv4Addr>;
     // speed3 S3-05: one detached lookup through a TUN run's new core (default: none)
@@ -646,12 +663,24 @@ pub async fn run_protected_switch<O: SwitchOps + Send>(previous: Slot, candidate
 The runtime's ops (speed3): admission compares `Capture::compat` keys (every routing input, S3-10). A
 user's switch (`Origin::User`) to a server with fresh evidence (`InputsSource::server_facts` or
 `Failover::fresh`) skips the probe: select, then one proof within `Timings::confirm_candidate` (2 s, no
-hedge): the candidate's own downloads, else one echo through the capture; any exit counts. Failure
+hedge): the candidate's own downloads, else one echo through the core; any exit counts. Failure
 restores the previous slot as before. Every other switch probes first; a spent handshake budget proves
-by traffic. A slot without a recorded exit (proven by traffic) is re-proven by any answer. `stage`
-takes the request's hints for the candidate's names (S3-10 (b); filtered like a lookup) and asks only
-the rest through `dns-bootstrap-in`. Step lines: `switch admitted`, `candidate resolved` (`asked`),
-`candidate config built` (ms).
+by traffic. A slot without a recorded exit (proven by traffic) is re-proven by any answer.
+Lab L11-3: every proof after the select (candidate and the retained previous slot) echoes through the
+core (`Engines::egress_core`): under the proxy capture its mixed inbound, under the TUN the probe
+inbound `live-check-in` (always to the selector, no name lookup on the core's DoH connection the
+select cut, none of the user's rules). The probe-first candidate's confirm also counts its own
+downloads (any exit) and waits out an echo that got nothing back until `2 x confirm_candidate`; a
+balanced candidate whose observatory has not judged yet (`settle_of`, counted from the slot's start)
+is asked again at its settle point and given 8 s after it, in both orders. A staged slot has no
+recorded exit until its proof. `stage` takes the request's hints for the candidate's names (S3-10
+(b); filtered like a lookup), then what this process holds (lab L11-4,
+`vpnte_core::resolve::recall`: the app's names resolved ahead, a recent session's; an ahead lookup in
+flight is joined for up to 1 s; filtered alike) and asks only the rest through `dns-bootstrap-in`; a
+switch that fails at stage, probe or confirm drops the recalled names (`drop_names`). Step lines:
+`switch admitted`, `candidate resolved` (`ms`, `asked`), `candidate config built` (ms), `switch: the
+candidate's balancer settles first` (`ms`), `switch: the candidate carries traffic`, `switch: the
+candidate's echo got nothing back` (probe first; select first keeps `switch: the fresh candidate …`).
 
 ## Main flows
 ```rust

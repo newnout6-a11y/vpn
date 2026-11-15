@@ -9,6 +9,7 @@
 mod auto;
 mod decide;
 mod domains;
+mod first_run;
 mod gate;
 mod guard;
 mod inputs;
@@ -157,6 +158,12 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
     // The service's runtime has no server list: Tunnel mode fails over from here (p-speed).
     runtime.set_failover(failover.clone());
     let status = runtime.status();
+    // Lab live-11 L11-5: this process's own engines run once ahead of the first Proxy connect.
+    tokio::spawn(first_run::first_runs(
+        exes.subscribe(),
+        status.clone(),
+        b.shutdown.child_token(),
+    ));
 
     let journal = Arc::new(tweaks::Journal::open(&b.dirs.root, hardening::admit));
     if let Some(notice) = journal.notice() {

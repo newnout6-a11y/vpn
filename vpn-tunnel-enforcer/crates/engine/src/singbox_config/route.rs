@@ -1,11 +1,17 @@
 //! The `route` section: fixed rule order around routing's fragments.
 use serde_json::{Value, json};
 
+use vpnte_winnet::adapters::TUN_PROBE_V4;
+
 use super::outbounds::UpstreamParts;
 use super::{Capture, ConfigError, ConfigInputs, require_objects};
-use crate::tags::{DIRECT_IN, DIRECT_OUT, DNS_BOOTSTRAP_IN, DNS_REMOTE, PROBE_IN, PROXY_OUT};
+use crate::tags::{
+    DIRECT_IN, DIRECT_OUT, DNS_BOOTSTRAP_IN, DNS_REMOTE, PROBE_IN, PROXY_OUT, TUN_IN,
+};
 
 /// Rule order (first match wins):
+/// 0. TUN only: the readiness probe ([`probe_rule`]), ahead of every rule that could route the
+///    service's own probe anywhere;
 /// 1. loopback inbounds (bootstrap DNS, direct, live check);
 /// 2. routing's process rules (own engines, third-party cores, split-tunnel apps); they match
 ///    proxy-capture clients too: sing-box looks up the owner of every loopback source, and on
@@ -31,6 +37,9 @@ pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, Con
         Capture::Proxy { .. } => true,
     };
     let mut rules = Vec::new();
+    if tun {
+        rules.push(probe_rule());
+    }
     if i.listeners.dns_bootstrap.is_some() {
         rules.push(json!({ "inbound": DNS_BOOTSTRAP_IN, "action": "hijack-dns" }));
     }
@@ -104,6 +113,22 @@ pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, Con
     }
     route["default_domain_resolver"] = json!(DNS_REMOTE);
     Ok(route)
+}
+
+/// Lab live-11 L11-1: sing-box processes a fresh TUN's packets only some time after its started
+/// line, so the start probes it with TCP connects to [`TUN_PROBE_V4`]. sing-box completes the
+/// handshake itself (the system stack's own listener, or gVisor), the same path as the user's
+/// first connections, then serves the connection as DNS over TCP from its own resolver: the
+/// probe asks nothing and closes, so nothing is dialled, no TLS, no lookup. Not a reject: Windows
+/// answers a reset to its SYN by sending the SYN twice more, and a refused connect returns only
+/// after about 2 s.
+pub(super) fn probe_rule() -> Value {
+    json!({
+        "inbound": TUN_IN,
+        "network": "tcp",
+        "ip_cidr": [format!("{TUN_PROBE_V4}/32")],
+        "action": "hijack-dns",
+    })
 }
 
 /// A guard of the tunnel for the apps that take it: every app, or only the listed ones (an

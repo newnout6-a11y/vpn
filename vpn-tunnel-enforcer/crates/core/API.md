@@ -414,6 +414,7 @@ pub fn drop_names(names: &[String]);                 // a failed start: kept / r
 pub fn remember(name: &str, addrs: Vec<IpAddr>);     // an answer of the lookup ahead, as recent
 pub fn remembers(name: &str) -> bool;                // a recent answer would be used now
 pub async fn resolve_ahead(name: &str) -> Result<Vec<IpAddr>, ResolveError>; // foreign IP-literal DoH only
+pub async fn recall(name: &str) -> Option<Vec<IpAddr>>; // L11-4: kept / recent / an ahead lookup joined
 pub fn may_be_server(ip: IpAddr) -> bool;            // no block page, loopback, link-local, multicast
 ```
 speed3 S3-09: after `end_session` the names of the session answer `resolve_host` and
@@ -423,8 +424,13 @@ answered) and calls `forget(sid)` for «Забыть меня»; the app, one us
 runtime calls `keep_resolved` right after a start runs (the names it looked up itself, never the
 app's hints) and `drop_names` when a start fails (not a cancel). `resolve_server` takes A at once
 (no AAAA grace for an address to dial). `resolve_ahead` (the app's lookup of the selected server
-before the click) asks only 1.1.1.1, 9.9.9.9, 8.8.8.8 and 94.140.14.140 over DoH: no name to
-resolve first, no SNI, nothing to the ISP's or the OS's resolver.
+and, lab L11-4, of its group's likely picks before the click) asks only 1.1.1.1, 9.9.9.9, 8.8.8.8
+and 94.140.14.140 over DoH: no name to resolve first, no SNI, nothing to the ISP's or the OS's
+resolver; it remembers its answer for the owner (`remember`) and, while it runs, is shared: a
+second `resolve_ahead` of the name or a `recall` joins it instead of asking again. `recall` (a
+switch's stage) answers a name from the running session's kept addresses or the owner's recent
+ones, else waits for the owner's ahead lookup of it in flight; `None` otherwise. Unfiltered: the
+caller filters it as a looked-up answer (`may_be_server`).
 Session names (lab F11, p-follow3): `keep_for_session` resolves each name of the session that
 started at `started` over the chain (never the OS resolver; its last known address when the chain
 fails) and keeps it until `end_session` or a newer start. While a name is kept, `resolve_host`

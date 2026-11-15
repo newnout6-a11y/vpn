@@ -126,6 +126,13 @@ pub fn candidates<'a>(
     found.into_iter().map(|(_, r)| r).collect()
 }
 
+/// Lab L11-4: the rows a user is likely to pick next from `base`'s group, most likely first: its
+/// siblings a check found healthy, the fastest first (their names are resolved ahead).
+pub fn likely_picks<'a>(rows: &'a [ServerRow], base: &ServerRow) -> Vec<&'a ServerRow> {
+    let checked = candidates(rows, base, |_| false).into_iter();
+    checked.filter(|r| alive(r) == Some(true)).collect()
+}
+
 #[async_trait]
 impl Failover for ServerFailover {
     async fn next_live_sibling(&self, _cancel: &CancellationToken) -> Option<VpnProfile> {

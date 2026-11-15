@@ -47,6 +47,10 @@ pub const TUN_RESOLVER_V4: Ipv4Addr = Ipv4Addr::new(192, 168, 250, 254);
 /// sing-box's documentation prefix (same anti-detection reasoning as [`TUN_V4`]).
 pub const TUN_V6: Ipv6Net =
     Ipv6Net::new_assert(Ipv6Addr::new(0xfd8b, 0x3f2a, 0x91c4, 0, 0, 0, 0, 1), 126);
+/// Where the readiness probe of a fresh TUN connects (lab live-11 L11-1): sing-box's first route
+/// rule completes TCP to it itself and answers it as DNS. RFC 5737 TEST-NET-1 is never routed on
+/// the internet, so nothing real is ever dialled at it, and it lies inside the TUN's `0.0.0.0/1`.
+pub const TUN_PROBE_V4: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 253);
 
 /// Address family selector for route and interface reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -105,5 +109,9 @@ mod tests {
         assert_eq!(TUN_V4.network(), Ipv4Addr::new(192, 168, 250, 252));
         assert!(TUN_V4.contains(&TUN_RESOLVER_V4));
         assert_eq!(TUN_V6.to_string(), "fd8b:3f2a:91c4::1/126");
+        // The probe target is a documentation address, outside our /30 and the never-routed
+        // ranges the TUN leaves out, so it always enters the TUN.
+        assert!(TUN_PROBE_V4.is_documentation());
+        assert!(!TUN_V4.contains(&TUN_PROBE_V4));
     }
 }

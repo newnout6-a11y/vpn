@@ -23,6 +23,8 @@ pub(super) struct Parts<'a> {
     pub(super) routing: vpnte_engine::singbox_config::RoutingParts,
     pub(super) phys_dns: Vec<std::net::Ipv4Addr>,
     pub(super) direct_vpn: bool,
+    /// What the upstream's own engine dials, kept out of the TUN's routes (lab live-11 L11-2).
+    pub(super) servers: Vec<std::net::IpAddr>,
 }
 
 pub(super) type Ready = (
@@ -81,7 +83,7 @@ impl Actor {
                 routing: p.routing.clone(),
                 phys_dns: p.phys_dns.clone(),
             };
-            let (json, compat) = self.capture.config(p.plan, &parts)?;
+            let (json, compat) = self.capture.config_excluding(p.plan, &parts, &p.servers)?;
             let core = self
                 .deps
                 .engines
