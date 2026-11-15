@@ -8,6 +8,8 @@
       "install": "Install the helper service",
       "starting": "The helper service is starting…",
       "stopped": "The helper service is stopped. Proxy mode works without it.",
+      "outdated": "The helper service is out of date. Proxy mode works without it.",
+      "update": "Update the helper service",
       "older": {
         "appScope": "The helper service updates itself. Until then, Tunnel mode sends every app through the VPN."
       },

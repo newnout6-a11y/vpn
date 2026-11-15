@@ -4,7 +4,7 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use vpnte_service::proto::PROTOCOL;
+use vpnte_service::proto::{PROTOCOL, negotiate};
 use vpnte_ui::helper::{Ability, HelperApi, Lack, Service};
 
 use super::*;
@@ -17,6 +17,7 @@ fn facts(installed: bool, protocol: Option<u32>, elevated: bool, tun: bool) -> F
         elevated,
         tun,
         starting: false,
+        outdated: false,
         scm: None,
     }
 }
@@ -73,18 +74,36 @@ fn an_installed_service_carries_tunnel_and_kill_switch() {
     }
 }
 
-/// A service before the apps page's scope runs Tunnel mode routing every app until it updates
-/// itself, and says so.
+/// Review wire5-a1: a service two versions back (protocol 3 against this protocol-5 app, the
+/// owner's 2.0.0) refuses the Hello, so no protocol is ever stored (`remote/tests/outdated.rs`
+/// drives that refusal): it shows as too old to speak to, with its update, never as current.
+/// Tunnel mode stays the service's (it waits for the update); Proxy mode needs nothing.
 #[test]
-fn an_older_service_says_what_it_lacks() {
-    let cap = derive(facts(true, Some(SCOPE_PROTOCOL - 1), false, true));
-    assert_eq!(
-        cap.service,
-        Service::Older {
-            lacks: vec![Lack::AppScope]
-        }
-    );
+fn a_service_that_refused_the_hello_is_outdated() {
+    assert_eq!(negotiate(PROTOCOL, 3), None);
+    let refused = Facts {
+        outdated: true,
+        ..facts(true, None, false, true)
+    };
+    let cap = derive(refused);
+    assert_eq!(cap.service, Service::Outdated);
+    assert!(cap.service.needs_update());
+    assert_eq!(cap.service.pause_key(), Some("ui.helper.outdated"));
     assert_eq!(cap.tunnel, Ability::Service);
+    assert_eq!(cap.kill_switch, Ability::Service);
+    // Down or starting says so first; a service that is not installed is missing.
+    let stopped = Facts {
+        scm: Some(Presence::Stopped),
+        ..refused
+    };
+    assert_eq!(derive(stopped).service, Service::Stopped);
+    let missing = Facts {
+        installed: false,
+        ..refused
+    };
+    assert_eq!(derive(missing).service, Service::Missing);
+    // What an older service lacks is still named for a service before the scope.
+    assert_eq!(lacks(SCOPE_PROTOCOL - 1), vec![Lack::AppScope]);
     assert_eq!(lacks(SCOPE_PROTOCOL), Vec::new());
 }
 

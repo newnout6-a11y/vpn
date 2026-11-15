@@ -108,24 +108,25 @@ struct EgressSource {
     confirmations: Option<Arc<dyn Confirmations>>,
     /// The session's `mixed` inbound under the proxy capture; `None`: the TUN.
     via: Option<u16>,
-    /// The core's probe inbound (`live-check-in`, credentials required): the TUN's idle probe.
+    /// The core's probe inbound (`live-check-in`, credentials required): the idle probe's way.
     check: Option<Loopback>,
     carried: Carried,
 }
 
 impl EgressSource {
-    /// The idle probe's echo (budget [`IDLE_PROBE`]): under the proxy capture through the
-    /// session's mixed inbound, the way the user's programs go; under the TUN through the core's
-    /// probe inbound to the selected upstream, as a switch's confirm (lab L11-3): through the
-    /// capture the echo looked its service's name up on the core's DoH connection, which a
-    /// select or a network change may just have cut, and the user's rules applied to it.
+    /// The idle probe's echo (budget [`IDLE_PROBE`]): through the core's probe inbound to the
+    /// selected upstream in both captures, as a switch's confirm. Through the capture the user's
+    /// rules apply to it: one sending the echo's service direct reads the home address from a
+    /// dead server (p-fix-review7), and under the TUN the echo looked its service's name up on
+    /// the core's DoH connection, which a select or a network change may just have cut (lab
+    /// L11-3). A core without that inbound keeps the capture's way.
     async fn echo(&self, cancel: &CancellationToken) -> AppResult<IpAddr> {
-        match (self.via, &self.check) {
-            (None, Some(check)) => {
+        match &self.check {
+            Some(check) => {
                 let (engines, creds) = (&self.engines, check.creds.as_ref());
                 (engines.egress_core(check.port, creds, IDLE_PROBE, None, cancel)).await
             }
-            (via, _) => self.engines.egress(via, IDLE_PROBE, cancel).await,
+            None => self.engines.egress(self.via, IDLE_PROBE, cancel).await,
         }
     }
 }

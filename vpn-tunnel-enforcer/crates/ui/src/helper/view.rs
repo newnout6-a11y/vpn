@@ -10,9 +10,11 @@ use crate::widgets::{Button, ButtonKind, use_job};
 
 /// The line where a privileged control lives: nothing while it works; «… работает через
 /// службу-помощник.» with «Установить службу-помощник» while the service is missing;
-/// «Служба-помощник запускается…» / «… остановлена…» while the installed one is down; «В этой
-/// версии недоступно.» for what no part of this version carries; under Tunnel mode, what an older
-/// service does not do yet (it updates itself). Nothing without a helper backend in context.
+/// «Служба-помощник запускается…» / «… остановлена…» while the installed one is down;
+/// «Служба-помощник устарела.» with «Обновить службу-помощник» while it is too old to speak to;
+/// «В этой версии недоступно.» for what no part of this version carries; under Tunnel mode, what
+/// an older service does not do yet (it updates itself). Nothing without a helper backend in
+/// context.
 #[component]
 pub fn HelperLine(feature: Feature) -> Element {
     let cap = use_capability();
@@ -36,6 +38,7 @@ pub fn HelperLine(feature: Feature) -> Element {
         return rsx! {};
     }
     let offer = ability == Ability::NeedsService;
+    let update = ability == Ability::Service && cap.service.needs_update();
     rsx! {
         div { class: "helper-line", "data-helper": feature.id(),
             if let Some(text) = text {
@@ -44,18 +47,19 @@ pub fn HelperLine(feature: Feature) -> Element {
             for lack in lacks {
                 p { class: "helper-line-text", "data-lack": lack.id(), {t!(lack_key(lack))} }
             }
-            if offer {
-                InstallService {}
+            if offer || update {
+                InstallService { update }
             }
         }
     }
 }
 
-/// «Установить службу-помощник» (Windows shows its one prompt; a declined prompt changes
-/// nothing) and why a failed install failed. For a place where installing makes the control
+/// «Установить службу-помощник», or «Обновить службу-помощник» over a service too old to speak
+/// to (`update`: the same install verb; Windows shows its one prompt, a declined prompt changes
+/// nothing), and why a failed install failed. For a place where installing makes the control
 /// beside it work; nothing without a helper backend in context.
 #[component]
-pub fn InstallService() -> Element {
+pub fn InstallService(#[props(default)] update: bool) -> Element {
     let api = try_use_context::<Rc<dyn HelperApi>>();
     let install = use_job::<bool>();
     let Some(api) = api else {
@@ -74,7 +78,7 @@ pub fn InstallService() -> Element {
                 let api = api.clone();
                 install.start(move |_| async move { api.install_service().await });
             },
-            {t!("ui.helper.install")}
+            {t!(install_key(update))}
         }
         if let Some(error) = error {
             p { class: "helper-line-error", role: "alert", "{error}" }
@@ -89,6 +93,15 @@ fn needs_key(feature: Feature) -> &'static str {
         Feature::Tunnel => "ui.helper.tunnel",
         Feature::KillSwitch => "ui.helper.killSwitch",
         Feature::Policies | Feature::Capture => "ui.helper.viaService",
+    }
+}
+
+/// The install button's label: an update over a service too old to speak to.
+pub(super) const fn install_key(update: bool) -> &'static str {
+    if update {
+        "ui.helper.update"
+    } else {
+        "ui.helper.install"
     }
 }
 

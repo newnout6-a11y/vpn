@@ -331,10 +331,13 @@ impl Hub {
         );
         let kill_switch = w.kill_switch.borrow();
         state.paused = kill_switch.pause.is_some();
-        // The tray follows the start page's verdict: an explained same exit is no leak (L10-7).
+        // The tray follows the start page's verdict: an explained same exit is no leak (L10-7)
+        // and no protection either, but the page's calm line (review wire5-b1).
         let other_vpn =
             project::other_vpn(local.foreign.as_ref(), kill_switch.foreign_vpn.is_some());
-        state.leak &= project::same_exit(&snap, &status, &evidence, other_vpn) == SameExit::No;
+        let same = project::same_exit(&snap, &status, &evidence, other_vpn);
+        state.leak &= same == SameExit::No;
+        state.same_exit = same != SameExit::No;
         drop((snap, status, evidence, kill_switch, local));
         set(&self.tray, state);
     }

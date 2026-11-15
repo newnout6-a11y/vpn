@@ -14,6 +14,10 @@ pub enum Service {
     Starting,
     /// Installed but stopped: Tunnel mode waits for it, Proxy mode works without it.
     Stopped,
+    /// Installed but too old for this app to speak to (it refused the link: two protocol
+    /// versions back, its update declined, review wire5-a1): Tunnel mode waits for its update,
+    /// Proxy mode works without it.
+    Outdated,
 }
 
 impl Service {
@@ -23,8 +27,14 @@ impl Service {
         match self {
             Self::Starting => Some("ui.helper.starting"),
             Self::Stopped => Some("ui.helper.stopped"),
+            Self::Outdated => Some("ui.helper.outdated"),
             Self::Missing | Self::Installed | Self::Older { .. } => None,
         }
+    }
+
+    /// Its one calm action is the update (the service's install verb over the old one).
+    pub const fn needs_update(&self) -> bool {
+        matches!(self, Self::Outdated)
     }
 }
 
@@ -97,7 +107,11 @@ impl Capability {
     pub fn lacks(&self) -> &[Lack] {
         match &self.service {
             Service::Older { lacks } => lacks,
-            Service::Missing | Service::Installed | Service::Starting | Service::Stopped => &[],
+            Service::Missing
+            | Service::Installed
+            | Service::Starting
+            | Service::Stopped
+            | Service::Outdated => &[],
         }
     }
 }

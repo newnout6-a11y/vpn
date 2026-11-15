@@ -312,4 +312,9 @@ pub trait TunnelOps: Send + Sync + 'static {
     fn service_starting(&self) -> bool {
         false
     }
+    /// The helper service refused this app's version at the last link: it is too old to speak
+    /// to, and its update is what helps (added by p-lab13, review wire5-a1). The default: no.
+    fn service_outdated(&self) -> bool {
+        false
+    }
 }

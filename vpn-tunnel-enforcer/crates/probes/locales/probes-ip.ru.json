@@ -106,7 +106,8 @@
           "viaVpn": "IPv6 через VPN"
         },
         "selfTest": {
-          "notRun": "Не запускалась"
+          "notRun": "Не запускалась",
+          "notInMode": "Только в режиме «Туннель» с kill switch"
         },
         "adapters": {
           "unknown": "Не удалось проверить адаптеры",

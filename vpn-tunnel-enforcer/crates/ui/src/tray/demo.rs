@@ -56,6 +56,11 @@ impl DemoTray {
         };
         match status {
             TrayStatus::Protected => protected,
+            TrayStatus::SameExit => TrayState {
+                same_exit: true,
+                public_ip: None,
+                ..protected
+            },
             TrayStatus::Leak => TrayState {
                 leak: true,
                 ..protected

@@ -7,6 +7,7 @@
       "proxyNone": "Proxy: not selected",
       "tip": {
         "protected": "VPN Tunnel Enforcer — Protected",
+        "sameExit": "VPN Tunnel Enforcer — Exit matches the address without the VPN",
         "leak": "VPN Tunnel Enforcer — IP leak",
         "off": "VPN Tunnel Enforcer — Off",
         "starting": "VPN Tunnel Enforcer — Starting protection",
@@ -23,6 +24,7 @@
       "menu": {
         "status": {
           "protected": "Status: Protected",
+          "sameExit": "Status: Exit matches the address without the VPN",
           "leak": "Status: IP leak",
           "off": "Status: Off",
           "starting": "Status: Starting protection",
@@ -72,6 +74,7 @@
         "restoreFailed": "Could not restore the previous system proxy settings (demo).",
         "status": {
           "protected": "Protected",
+          "sameExit": "Same exit",
           "leak": "Leak",
           "off": "Off",
           "starting": "Starting",

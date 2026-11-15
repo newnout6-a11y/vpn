@@ -619,7 +619,11 @@ origin: only the crash restart itself, `Actor::recovering`, counts, speed3-a4), 
 part of the core's way up, so the proof runs from slot A's accept. A crash recovery also takes the
 server's own traffic through slot A of the new core (bytes back, Clash API) as its proof; when the
 handshake budget has no slot at once the echo waits for one only after 3 s without traffic (lab
-L10-2). Step lines: `slot A exit proof begins start=…`, `handshake slot ms=… request=first|next`,
+L10-2); so does a user's start whose capture is held from before (`prior`: a preserved stop, a failed
+start that kept protection; its programs reach the new core), lab live-13 L13-2. A fresh start keeps the
+gated echo (nobody is routed into its server before it returns). The egress watchdog's idle probe goes
+through the core's `live-check-in` in both captures (the user's rules never apply to it).
+Step lines: `slot A exit proof begins start=…`, `handshake slot ms=… request=first|next`,
 `slot A proven by its traffic ms=…`, `physical dns read ms=…`, `xray ready by=line|poll`,
 `dns warm-up answered ms=… answered=…`. An in-place switch whose
 server name has no handshake budget left (`Engines::handshake_ready`) selects the candidate without

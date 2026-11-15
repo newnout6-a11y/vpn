@@ -25,8 +25,8 @@ use vpnte_core::store::Store;
 use vpnte_probes::leak::SelfTestResult;
 use vpnte_service::pipe::client::{CallError, Client, Frames, Incoming, Requests, ServerCheck};
 use vpnte_service::proto::{
-    Event, KeptSession, KillSwitchStateWire, Reply, Request, RuleSetsWire, StatusReply, StatusWire,
-    TunnelEventWire, WireError,
+    ErrorCode, Event, KeptSession, KillSwitchStateWire, Reply, Request, RuleSetsWire, StatusReply,
+    StatusWire, TunnelEventWire, WireError,
 };
 use vpnte_tunnel::api::{ExitInfo, TunError, TunStatus, TunStatusKind, TunWarning, TunnelEvent};
 use vpnte_tunnel::runtime::InputsSource;
@@ -94,6 +94,9 @@ struct Inner {
     /// The protocol the last link speaks (0: no link yet); the apps page says when an older
     /// service cannot carry its scope (p-app-split).
     protocol: AtomicU32,
+    /// The last link's Hello was refused for its version: the service is too old to speak to
+    /// (review wire5-a1).
+    outdated: AtomicBool,
     /// A private test pipe served by anyone; `None` = the service's pipe, served by its exe.
     test_pipe: Option<String>,
     inputs: Arc<dyn InputsSource>,
@@ -168,6 +171,25 @@ fn truthful(err: AppError, presence: Presence) -> AppError {
     }
 }
 
+/// The service refused the Hello for its version. Review wire5-a1: the service is the old side.
+/// Only an app's own installer or its update puts the service on the PC, so with one app on it
+/// the service is never the newer one; an update the user declined leaves it two versions back.
+fn too_old<T>(hello: &Result<T, CallError>) -> bool {
+    matches!(hello, Err(CallError::Service(w)) if w.code == ErrorCode::Version)
+}
+
+/// A refused Hello says what helps: the service's update (the connect said to update the app,
+/// which is already the newer side).
+fn outdated(err: CallError) -> CallError {
+    match err {
+        CallError::Service(w) if w.code == ErrorCode::Version => CallError::Pipe(AppError::msg(
+            ErrorKind::Validation,
+            Msg::new("app.service.outdated"),
+        )),
+        other => other,
+    }
+}
+
 /// A failed call as the runtime's error: the service's own message, or the pipe's.
 fn tun_error(err: CallError) -> TunError {
     match err {
@@ -236,6 +258,7 @@ impl Remote {
             #[cfg(test)]
             test_presence: Mutex::new(None),
             protocol: AtomicU32::new(0),
+            outdated: AtomicBool::new(false),
             test_pipe,
             inputs,
             protection,
@@ -266,6 +289,17 @@ impl Remote {
     /// The protocol the service's last link speaks; `None` before the first link.
     pub(crate) fn protocol(&self) -> Option<u32> {
         Some(self.0.protocol.load(Ordering::Relaxed)).filter(|p| *p > 0)
+    }
+
+    /// The service refused this app's version at the last link: too old to speak to.
+    pub(crate) fn outdated(&self) -> bool {
+        self.0.outdated.load(Ordering::Relaxed)
+    }
+
+    /// The app just installed its own service over the old one: what refused this app's version
+    /// is gone, so the page offers no update until a link says otherwise.
+    pub(crate) fn reinstalled(&self) {
+        self.0.outdated.store(false, Ordering::Relaxed);
     }
 
     /// The service is installed: Tunnel mode and the kill switch go through it. A service the
@@ -367,7 +401,9 @@ impl Remote {
             pause = (pause * 2).min(START_PAUSES.1);
         };
         self.0.starting.store(false, Ordering::Relaxed);
-        let (protocol, _) = client.hello(env!("CARGO_PKG_VERSION")).await?;
+        let hello = client.hello(env!("CARGO_PKG_VERSION")).await;
+        self.0.outdated.store(too_old(&hello), Ordering::Relaxed);
+        let (protocol, _) = hello.map_err(outdated)?;
         self.0.protocol.store(protocol, Ordering::Relaxed);
         let (requests, frames) = client.split().await?;
         let gone = CancellationToken::new();

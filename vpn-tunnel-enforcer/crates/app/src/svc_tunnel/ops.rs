@@ -367,9 +367,16 @@ impl TunnelOps for TunnelService {
         self.runtime.remote().starting()
     }
 
+    fn service_outdated(&self) -> bool {
+        let remote = self.runtime.remote();
+        remote.installed() && remote.outdated()
+    }
+
     fn service_installed(&self) -> bool {
-        let installed = self.runtime.remote().recheck();
+        let remote = self.runtime.remote();
+        let installed = remote.recheck();
         if installed {
+            remote.reinstalled();
             self.guard.service_installed();
         }
         installed

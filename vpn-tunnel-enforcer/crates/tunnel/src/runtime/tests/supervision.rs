@@ -127,6 +127,30 @@ async fn an_idle_session_is_judged_by_a_probe() {
     assert_eq!(idle_probes(&w), (1, 0), "{:?}", w.log());
 }
 
+/// p-fix-review7 follow-up: a Proxy session's idle probe asks through the core's probe inbound
+/// as well. Through the mixed inbound a user rule sending the echo's service direct answered
+/// with the home address, so a server that died later read alive and was never caught.
+#[tokio::test]
+async fn a_proxy_idle_probe_ignores_the_users_direct_rules() {
+    let w = World::new();
+    // The fake Proxy capture: its mixed port is the one the user's direct rule answers on.
+    let mut d = budget_deps(&w);
+    d.timings.egress_watch = Duration::from_millis(20);
+    let h = TunnelHandle::spawn(d);
+    let mut events = h.subscribe();
+    let req = StartRequest {
+        capture: CaptureKind::Proxy,
+        ..vpn_req(NATIVE_KEY, EnginePref::SingBox)
+    };
+    h.start(req, CancellationToken::new()).await.unwrap();
+    let mixed = format!("egress:{FAKE_MIXED_PORT}");
+    let before = w.count(&mixed);
+    *w.echo_direct.lock() = Some("192.0.2.77".parse().expect("ip"));
+    w.egress_silent.store(true, Ordering::SeqCst);
+    until(&mut events, is_down).await;
+    assert_eq!(w.count(&mixed), before, "{:?}", w.log());
+}
+
 /// Speed audit conn2: a crash right after the session carried traffic is no frozen server, so
 /// the restart comes at the backoff, not after the freeze window.
 #[tokio::test]

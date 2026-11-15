@@ -107,6 +107,7 @@ every other one (all of a failed call's, all of a connect's or switch's) into a 
 | `service_protocol()` | p-app-split: Apps page, the line «Служба-помощник старой версии…» under «Только выбранные приложения» (Tunnel mode through a linked service older than `SCOPE_PROTOCOL`); `None` without a link (default) |
 | `service_present()` | p-noadmin-ui: `api_helper` (the capability view): the service is registered, as the tunnel uses it (read-only; default `false`) |
 | `service_losses()` | p-noadmin-ui: `api_helper`: a link lost without the app asking (the service restarted, e.g. to update itself): the view re-reads the protocol after the re-link (default `None`) |
+| `service_outdated()` | p-lab13 (wire5-a1): the helper service refused this app's Hello for its version (two protocol versions back): `api_helper` shows `Service::Outdated` with «Обновить службу-помощник», a Tunnel connect says `app.service.outdated` (default `false`) |
 | `service_starting()` | p-live-fix: the SCM reports the helper service START_PENDING / RUNNING while its pipe does not answer yet (after a Windows restart): a view says «Служба-помощник запускается…», not «не установлена» (default `false`); p-live2: `api_helper` folds it (and its own SCM read: stopped) into `Service::{Starting, Stopped}` for the helper line, the start-page strip and the tray |
 | `shutdown(budget)` | app-main (Tray `quit`) |
 | `proxies()` | Panels proxy column and actions (`api_dashboard/proxies.rs`), Servers `start_proxies`; `None` = the column stays empty, actions answer `Conflict` |

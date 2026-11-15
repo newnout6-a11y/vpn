@@ -106,7 +106,8 @@
           "viaVpn": "IPv6 through the VPN"
         },
         "selfTest": {
-          "notRun": "Not run"
+          "notRun": "Not run",
+          "notInMode": "Runs in Tunnel mode with the kill switch on"
         },
         "adapters": {
           "unknown": "The adapters could not be checked",

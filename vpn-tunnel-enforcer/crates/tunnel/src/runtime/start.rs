@@ -529,10 +529,7 @@ impl Actor {
             work.prior.is_some(),
             guard,
         );
-        // Lab live-10 L10-2: a crash recovery's server carried this user's traffic until the
-        // crash, and the programs reconnect through the new core (the system proxy and the
-        // TUN's routes stay): bytes back through slot A prove it as well as an echo does.
-        let own_traffic = beside && self.recovering;
+        let own_traffic = proves_by_traffic(req, self.recovering, work.prior.is_some(), beside);
         let (core_up, core_seen) = oneshot::channel();
         let mut core_seen = own_traffic.then_some(core_seen);
         let mut proving = None;
@@ -777,10 +774,11 @@ impl Actor {
         Ok(ip)
     }
 
-    /// Slot A's exit proof; `core` (a crash recovery of this server, L10-2) brings the new
-    /// core's Clash API, and bytes back through slot A prove the exit as well. When the server
-    /// name's handshake budget has no slot at once, the traffic gets [`OWN_TRAFFIC`] first and
-    /// the echo waits for its slot only after it. `None` = proven by the traffic.
+    /// Slot A's exit proof; `core` (a start whose programs reach the new core:
+    /// [`proves_by_traffic`]) brings the new core's Clash API, and bytes back through slot A
+    /// prove the exit as well. When the server name's handshake budget has no slot at once, the
+    /// traffic gets [`OWN_TRAFFIC`] first and the echo waits for its slot only after it. `None`
+    /// = proven by the traffic.
     async fn prove_exit_a(
         &self,
         profile: &VpnProfile,
@@ -800,7 +798,7 @@ impl Actor {
         let free = self.deps.engines.handshake_ready(&profile.profile);
         let echo = async {
             if !free {
-                tracing::info!("recovery: no handshake slot free now, its traffic proves it first");
+                tracing::info!(start = ?origin, "no handshake slot free now, the session's traffic proves it first");
                 // A balanced graph's members carry traffic once its observatory judged them.
                 let first = settle.unwrap_or_default() + OWN_TRAFFIC;
                 tokio::select! {
@@ -839,12 +837,23 @@ impl Actor {
     }
 }
 
-/// How long a recovery's own traffic may take to prove its server before the echo waits for a
-/// handshake slot (L10-2; the switch's proof by traffic gets the same).
+/// How long a start's own traffic ([`proves_by_traffic`]) may take to prove its server before the
+/// echo waits for a handshake slot (L10-2; the switch's proof by traffic gets the same).
 const OWN_TRAFFIC: Duration = Duration::from_secs(3);
 /// How often the Clash API is read for that traffic (loopback; a fresh core holds few
 /// connections).
 const TRAFFIC_POLL: Duration = Duration::from_millis(100);
+
+/// The programs reach the new core while slot A is proven, so their bytes back through the slot
+/// prove its server as well as an echo does (the switch's `confirm_by_traffic` rule). A crash
+/// recovery's programs reconnect through it (L10-2: the system proxy and the TUN's routes stay);
+/// so do a user's after a preserved stop, the capture held from before (lab live-13 L13-2: a
+/// user's connect is no background check, it does not wait out the name's handshake budget
+/// behind them). A fresh start keeps the gated echo: nobody is routed into its server before it
+/// returns (the system proxy is written after it; a TUN's routes and filters are new).
+fn proves_by_traffic(req: &StartRequest, recovering: bool, prior: bool, beside: bool) -> bool {
+    beside && (recovering || (req.origin == Origin::User && prior))
+}
 
 /// The core and its capture start beside slot A's exit proof (speed3 S3-03, S3-08). Under a kill
 /// switch that holds the block (a recovery, a protected restart) traffic waits either way

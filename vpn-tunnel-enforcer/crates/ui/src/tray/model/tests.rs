@@ -290,6 +290,22 @@ fn menu_ids_round_trip_and_separators() {
     assert_eq!(order, TrayItemId::ALL);
 }
 
+/// Review wire5-b1: the exit the start page explains as the address without our VPN is neither
+/// «Защищено» with the green badge nor a leak: a neutral state with its own calm line, and
+/// «Выключить защиту» stays the way out. A real leak still wins.
+#[test]
+fn the_same_exit_is_neutral_never_protected() {
+    let same = TrayState {
+        same_exit: true,
+        ..connected()
+    };
+    assert_eq!(TrayStatus::of(&same), TrayStatus::SameExit);
+    assert_eq!(TrayStatus::SameExit.badge(), Badge::Amber);
+    assert!(enabled(&same, TrayItemId::Stop));
+    let leak = TrayState { leak: true, ..same };
+    assert_eq!(TrayStatus::of(&leak), TrayStatus::Leak);
+}
+
 #[test]
 fn badges_follow_the_old_palette() {
     let badge = |s: TrayStatus| s.badge();

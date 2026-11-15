@@ -42,6 +42,8 @@ pub(crate) struct Facts {
     pub tun: bool,
     /// The SCM says the service is coming up while its pipe does not answer yet.
     pub starting: bool,
+    /// The service refused this app's version at its last link (review wire5-a1).
+    pub outdated: bool,
     /// The SCM's state of the installed service when the view was followed live (`None`: not
     /// read, as for a page reading the view at an action).
     pub scm: Option<Presence>,
@@ -57,6 +59,7 @@ impl Facts {
             elevated: backend.elevated,
             tun: tunnel.is_some_and(|t| t.tun_available()),
             starting: tunnel.is_some_and(|t| t.service_starting()),
+            outdated: tunnel.is_some_and(|t| t.service_outdated()),
             scm: None,
         }
     }
@@ -74,6 +77,8 @@ pub(crate) fn derive(f: Facts) -> Capability {
         (true, Some(Presence::Starting)) => Service::Starting,
         (true, Some(Presence::Stopped | Presence::Stopping)) => Service::Stopped,
         (true, _) if f.starting => Service::Starting,
+        // Review wire5-a1: no link at all is no current service; its update is what helps.
+        (true, _) if f.outdated => Service::Outdated,
         (true, _) => match f.protocol {
             Some(p) if p < PROTOCOL => Service::Older { lacks: lacks(p) },
             _ => Service::Installed,

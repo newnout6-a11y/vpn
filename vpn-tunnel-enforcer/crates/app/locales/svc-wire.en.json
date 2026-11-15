@@ -6,6 +6,7 @@
       "missing": "The helper service is not installed: Tunnel mode is unavailable, Proxy mode works.",
       "starting": "The helper service is starting… Tunnel mode will be available in a few seconds.",
       "stopped": "The helper service is stopped: Tunnel mode is unavailable for now, Proxy mode works.",
+      "outdated": "The helper service is out of date: Tunnel mode works once it is updated; Proxy mode works.",
       "refused": "Another program answers in place of the helper service, so the app does not talk to it."
     }
   }

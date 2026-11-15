@@ -290,7 +290,9 @@ pub struct CheckItem { pub id: &'static str, pub label: Msg, pub status: CheckSt
 pub struct CheckReport { pub ran_at: UnixMs, pub summary: CheckStatus, pub headline: Msg, pub items: Vec<CheckItem> }
 pub enum Mode { DirectVpn, LocalProxy { upstream: Option<HostPort> } }
 pub struct CheckInput { pub mode: Mode, pub tunnel_up: bool, pub evidence: IpEvidence, pub self_test: Option<SelfTestResult>,
-                        pub engine_log: Option<Vec<String>>, pub direct: Option<DirectAudit> }
+                        pub self_test_applies: bool, pub engine_log: Option<Vec<String>>, pub direct: Option<DirectAudit> }
+    // self_test_applies (L13-1): a TUN session with the kill switch on; elsewhere no self-test is `Info`
+    // «Только в режиме «Туннель» с kill switch» and leaves the summary to the items that ran
 pub async fn leak_check(reader: &IpReader, input: CheckInput, cancel: &CancellationToken) -> CheckReport;   // ≤ 15 s
 pub struct ConnRecord { pub chains: Vec<String>, pub rule: String, pub host: Option<String>,
                         pub destination_ip: Option<IpAddr>, pub process_path: Option<String> }   // Clash /connections row

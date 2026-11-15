@@ -1,13 +1,14 @@
 //! Pure rules of the start page that are not already in `vpnte_view`: the power-button click
-//! rule, which banners show, the node line of the identity column and its engine caption. No
-//! Dioxus, no clock reads.
+//! rule, which banners show, the node line of the identity column and its engine caption, the
+//! mascot's answer to a leak check. No Dioxus, no clock reads.
 use vpnte_base::Msg;
-use vpnte_base::types::UnixMs;
+use vpnte_base::types::{UnixMs, Verdict};
 use vpnte_view::identity::{ping_of, visible_leak};
 use vpnte_view::labels::{
     KillSwitchBanner, foreign_vpn_friendly_name, kill_switch_banner, node_meta,
 };
-use vpnte_view::swiss::ConnView;
+use vpnte_view::mascot::MascotEvent;
+use vpnte_view::swiss::{ConnView, Mode};
 
 use super::{DashboardView, EngineLine, PauseLine, SameExit};
 use crate::panels::{LocalPings, ServersView};
@@ -30,6 +31,21 @@ pub fn power_click(conn: &ConnView, command_running: bool) -> PowerAction {
         PowerAction::Disconnect
     } else {
         PowerAction::Connect
+    }
+}
+
+/// The mascot's answer to a finished leak check, as the page's leak fact reads it (lab live-13
+/// L13-1): scared by a real leak only, thoughtful by a real warning, silent where the page shows
+/// «—» (nothing to react to) or Proxy mode's calm «Вне прокси» (programs outside the proxy go
+/// direct by design).
+pub fn leak_reaction(verdict: Verdict, view: &DashboardView) -> Option<MascotEvent> {
+    let outside_proxy = view.conn.mode == Some(Mode::Soft) && !view.exit.leak;
+    match verdict {
+        Verdict::Ok => Some(MascotEvent::LeakOk),
+        Verdict::Warn => Some(MascotEvent::LeakWarn),
+        Verdict::Fail if outside_proxy => None,
+        Verdict::Fail => Some(MascotEvent::LeakFail),
+        Verdict::NotChecked => None,
     }
 }
 

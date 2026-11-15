@@ -151,6 +151,9 @@ pub struct CheckInput {
     pub evidence: IpEvidence,
     /// Latest self-test of this session, if one ran.
     pub self_test: Option<SelfTestResult>,
+    /// The session runs the self-test (a TUN session with the kill switch on): see
+    /// [`self_test_item`].
+    pub self_test_applies: bool,
     /// The current session's engine log lines; `None` = unavailable.
     pub engine_log: Option<Vec<String>>,
     /// [`audit_direct`] over the session's Clash connections; `None` = unavailable.
@@ -190,7 +193,7 @@ pub async fn leak_check(
         proxy_item(&input.mode, up, proxy, first_foreign),
         ipv4_item(v4.map(|s| s.ip), &input.evidence, up),
         ipv6_item(v6.map(|s| s.ip), physical.as_deref(), up),
-        self_test_item(input.self_test.as_ref()),
+        self_test_item(input.self_test.as_ref(), input.self_test_applies),
         adapters_item(foreign.as_deref(), up),
         dns_item(dns, up),
         engine_log_item(input.engine_log.as_deref(), up),

@@ -5,11 +5,10 @@ use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use dioxus::prelude::*;
-use vpnte_base::types::Verdict;
 use vpnte_view::mascot::MascotEvent;
 
 use super::Dash;
-use super::model::{COPIED_MS, PowerAction, power_click};
+use super::model::{COPIED_MS, PowerAction, leak_reaction, power_click};
 use crate::lang::tr;
 use crate::t;
 
@@ -113,11 +112,11 @@ impl Dash {
         let (api, dash) = (self.api.clone(), self.clone());
         self.leak.start(move |_| async move {
             match api.run_leak_check().await {
-                Ok(verdict) => dash.bus.send(match verdict {
-                    Verdict::Ok => MascotEvent::LeakOk,
-                    Verdict::Fail => MascotEvent::LeakFail,
-                    Verdict::Warn | Verdict::NotChecked => MascotEvent::LeakWarn,
-                }),
+                Ok(verdict) => {
+                    if let Some(event) = leak_reaction(verdict, &dash.view.peek()) {
+                        dash.bus.send(event);
+                    }
+                }
                 Err(err) => {
                     let message = tr(&err.user_msg());
                     if err.kind != vpnte_base::ErrorKind::Cancelled {

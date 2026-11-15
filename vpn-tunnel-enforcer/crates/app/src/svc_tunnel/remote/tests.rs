@@ -35,6 +35,7 @@ use crate::svc_core::docs::ProtectionDoc;
 mod fresh;
 mod handover;
 mod hints;
+mod outdated;
 mod takeover;
 
 /// A runtime that runs whatever it is asked to, at once.

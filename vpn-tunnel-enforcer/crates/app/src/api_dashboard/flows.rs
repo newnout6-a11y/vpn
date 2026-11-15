@@ -469,19 +469,35 @@ mod cases {
     /// Lab L10-7 (p-wire5): the start page and the tray give one verdict for one fact. A settled
     /// session whose read equals the address without our VPN: no proof, or a proof that saw
     /// another address, stays a red leak on both; the run's proof that saw that very address is
-    /// the server's own exit, one calm line and no leak on either. (Another VPN that owns this
-    /// PC's default route explains every case; the hub's own scan decides which applies here.)
+    /// the server's own exit, and another VPN that owns this PC's default route explains it too:
+    /// one calm line on the page, the neutral «Выход совпадает…» in the tray, never «Защищено»
+    /// (review wire5-b1). Review wire5-a2: each case carries facts of its own that the page and
+    /// the tray echo (the engine, the proxy address), so a wait ends only once the hub handled
+    /// that case's status: the previous case's view may already match its verdict. The hub sees
+    /// another VPN only where the test says so (the dev PC runs one of its own).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_page_and_the_tray_share_the_same_exit_verdict() {
         use std::net::IpAddr;
 
+        use vpnte_base::types::Engine;
         use vpnte_probes::ip_monitor::IpVerdict;
         use vpnte_probes::public_ip::IpSample;
+        use vpnte_tunnel::api::EngineRun;
         use vpnte_ui::dashboard::SameExit;
+        use vpnte_ui::tray::TrayStatus;
 
-        let other_vpn = super::super::feeds::scan_foreign().is_some_and(|f| f.default_route);
+        use super::super::project::ForeignSeen;
+
         let (hub, fake, _dir) = setup("same-exit");
         let (dash, tray) = (Dashboard(hub.clone()), Tray(hub.clone()));
+        // The hub's own scan at start lands first; from then on the test decides what it sees.
+        let scanned = super::super::feeds::scan_foreign();
+        within(async {
+            while hub.local.lock().foreign != scanned {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
         let home: IpAddr = "203.0.113.7".parse().expect("ip");
         let elsewhere: IpAddr = "198.51.100.42".parse().expect("ip");
         fake.evidence.send_replace(IpEvidence {
@@ -496,16 +512,30 @@ mod cases {
             baseline: None,
         });
         fake.transition(TunnelState::Connected, None);
-        for (proven, alone) in [
-            (None, SameExit::No),
-            (Some(elsewhere), SameExit::No),
-            (Some(home), SameExit::Server),
-        ] {
-            let same = if other_vpn { SameExit::OtherVpn } else { alone };
+        let other = ForeignSeen {
+            label: "Other VPN (10.66.0.1)".into(),
+            default_route: true,
+        };
+        let cases = [
+            (None, None, SameExit::No),
+            (Some(elsewhere), None, SameExit::No),
+            (Some(home), None, SameExit::Server),
+            (None, Some(other), SameExit::OtherVpn),
+        ];
+        for (i, (proven, foreign, same)) in cases.into_iter().enumerate() {
             let leak = same == SameExit::No;
+            let kind = if i % 2 == 0 {
+                Engine::SingBox
+            } else {
+                Engine::Xray
+            };
+            let addr = format!("127.0.0.1:{}", 20_000 + i);
+            hub.local.lock().foreign = foreign;
             fake.status.send_replace(TunStatus {
                 running: true,
                 proven_exit: proven,
+                engine: Some(EngineRun { kind, reason: None }),
+                proxy_addr: Some(addr.clone()),
                 ..TunStatus::default()
             });
             let (mut view, mut state) = (dash.state(), tray.state());
@@ -513,18 +543,28 @@ mod cases {
             // guard held across the next await blocks the hub's next publish (send_if_modified
             // takes the write lock) on this current-thread runtime, and nothing ever times out
             // (CI 14.11.2026: hung 38 min where no other VPN is seen).
-            let page = view.wait_for(|v| v.same_exit == same && v.exit.leak == leak);
+            let page = view.wait_for(|v| {
+                v.engine.as_ref().map(|e| e.engine) == Some(kind)
+                    && v.same_exit == same
+                    && v.exit.leak == leak
+            });
             let page = tokio::time::timeout(Duration::from_secs(5), page)
                 .await
                 .is_ok_and(|seen| seen.is_ok());
             let now = dash.state().borrow().clone();
             assert!(page, "{proven:?}: {:?} {:?}", now.same_exit, now.exit);
-            let tray_ok =
-                tokio::time::timeout(Duration::from_secs(5), state.wait_for(|t| t.leak == leak))
-                    .await
-                    .is_ok_and(|seen| seen.is_ok());
+            let echoed = |t: &vpnte_ui::tray::TrayState| t.proxy_addr.as_deref() == Some(&addr);
+            let tray_ok = tokio::time::timeout(Duration::from_secs(5), state.wait_for(echoed))
+                .await
+                .is_ok_and(|seen| seen.is_ok());
             let now = tray.state().borrow().clone();
             assert!(tray_ok, "{proven:?}: tray {now:?}");
+            let shown = if leak {
+                TrayStatus::Leak
+            } else {
+                TrayStatus::SameExit
+            };
+            assert_eq!(TrayStatus::of(&now), shown, "{proven:?}: tray {now:?}");
         }
     }
 }

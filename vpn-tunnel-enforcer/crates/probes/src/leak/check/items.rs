@@ -103,14 +103,17 @@ fn same_64(a: Ipv6Addr, b: Ipv6Addr) -> bool {
     a.segments()[..4] == b.segments()[..4]
 }
 
-/// `self-test`: the latest physical-adapter self-test (`None` = not run).
-pub fn self_test_item(result: Option<&SelfTestResult>) -> CheckItem {
+/// `self-test`: the latest physical-adapter self-test (`None` = not run). `applies`: the session
+/// runs it (a TUN session with the kill switch on); elsewhere it cannot run, so its absence is
+/// informational and leaves the summary to the items that did run (lab live-13 L13-1).
+pub fn self_test_item(result: Option<&SelfTestResult>, applies: bool) -> CheckItem {
+    let key = |k: &str| Msg::new(format!("probes.leak.check.selfTest.{k}"));
     let Some(result) = result else {
-        return CheckItem::new(
-            "self-test",
-            CheckStatus::NotChecked,
-            Msg::new("probes.leak.check.selfTest.notRun"),
-        );
+        return if applies {
+            CheckItem::new("self-test", CheckStatus::NotChecked, key("notRun"))
+        } else {
+            CheckItem::new("self-test", CheckStatus::Info, key("notInMode"))
+        };
     };
     let report = self_test::report(result);
     let status = match report.verdict {

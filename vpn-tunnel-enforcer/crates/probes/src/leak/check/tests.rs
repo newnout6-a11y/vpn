@@ -149,12 +149,21 @@ fn proxy_item_cases() {
 
 #[test]
 fn self_test_adapters_and_dns_items() {
-    assert_eq!(self_test_item(None).status, CheckStatus::NotChecked);
+    assert_eq!(self_test_item(None, true).status, CheckStatus::NotChecked);
+    // L13-1: where no self-test can run (Proxy mode, the kill switch Off) it is no missing proof.
+    assert_eq!(self_test_item(None, false).status, CheckStatus::Info);
+    let ok = [
+        ipv6_item(None, Some(&[]), true),
+        self_test_item(None, false),
+    ];
+    assert_eq!(summarize(&ok), CheckStatus::Ok);
     let clean = super::super::self_test::tests::complete();
-    assert_eq!(self_test_item(Some(&clean)).status, CheckStatus::Ok);
+    assert_eq!(self_test_item(Some(&clean), true).status, CheckStatus::Ok);
     let mut leak = clean.clone();
     leak.probes[0].reach = super::super::Reach::Reached { ip: ip("5.6.7.8") };
-    assert_eq!(self_test_item(Some(&leak)).status, CheckStatus::Fail);
+    assert_eq!(self_test_item(Some(&leak), true).status, CheckStatus::Fail);
+    // A result that exists keeps its verdict even where no new run comes.
+    assert_eq!(self_test_item(Some(&leak), false).status, CheckStatus::Fail);
     assert_eq!(adapters_item(None, true).status, CheckStatus::NotChecked);
     assert_eq!(adapters_item(Some(&[]), true).status, CheckStatus::Ok);
     let found = vec!["Happ (172.19.0.1)".to_owned()];
@@ -333,7 +342,7 @@ fn no_leaks_needs_every_leak_item() {
         vec![
             ipv4_item(Some(ip("198.51.100.1")), &e, true),
             ipv6_item(None, Some(&[]), true),
-            self_test_item(Some(&clean)),
+            self_test_item(Some(&clean), true),
             engine_log_item(Some(&lines), true),
         ]
     };
@@ -386,6 +395,7 @@ async fn cancelled_card_is_not_a_pass() {
         tunnel_up: true,
         evidence: evidence(),
         self_test: None,
+        self_test_applies: true,
         engine_log: None,
         direct: None,
     };
@@ -511,6 +521,7 @@ fn locale_fragments_match_the_code() {
             "probes.leak.check.dns.",
             vec!["notProbed", "answers", "silent"],
         ),
+        ("probes.leak.check.selfTest.", vec!["notRun", "notInMode"]),
         (
             "probes.leak.check.engineLog.",
             vec!["tunnelOff", "missing", "empty", "clean", "errors"],

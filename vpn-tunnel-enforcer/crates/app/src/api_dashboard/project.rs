@@ -479,6 +479,8 @@ pub(super) fn tray_state(
         },
         engine_running: snap.process_state == ProcessState::Running,
         leak: ev.verdict == IpVerdict::Failed,
+        // The start page's same-exit verdict: the caller fills it in, as the pause.
+        same_exit: false,
         kill_switch,
         restart: conn
             .restarting

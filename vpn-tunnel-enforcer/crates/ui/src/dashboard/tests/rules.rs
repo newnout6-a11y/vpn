@@ -377,3 +377,33 @@ fn the_mascot_hears_the_connects_mode() {
     let off = view(ConnView::default());
     assert_eq!(mascot_mode(&off), None);
 }
+
+/// Lab live-13 L13-1: the mascot said «Есть предупреждения» next to a «—» card. He reacts as the
+/// leak fact reads: «—» and Proxy mode's calm «Вне прокси» leave him quiet; a real warning, a
+/// real leak (also the proxy's own exit at the real address) and a pass get their lines.
+#[test]
+fn the_mascot_reacts_to_what_the_leak_fact_says() {
+    use vpnte_view::mascot::MascotEvent;
+    let tun = view(connected());
+    assert_eq!(leak_reaction(Verdict::NotChecked, &tun), None);
+    assert_eq!(
+        leak_reaction(Verdict::Warn, &tun),
+        Some(MascotEvent::LeakWarn)
+    );
+    assert_eq!(
+        leak_reaction(Verdict::Fail, &tun),
+        Some(MascotEvent::LeakFail)
+    );
+    assert_eq!(leak_reaction(Verdict::Ok, &tun), Some(MascotEvent::LeakOk));
+    let mut soft = view(ConnView {
+        mode: Some(Mode::Soft),
+        ..connected()
+    });
+    assert_eq!(leak_reaction(Verdict::Fail, &soft), None, "«Вне прокси»");
+    assert_eq!(leak_reaction(Verdict::NotChecked, &soft), None);
+    soft.exit.leak = true;
+    assert_eq!(
+        leak_reaction(Verdict::Fail, &soft),
+        Some(MascotEvent::LeakFail)
+    );
+}

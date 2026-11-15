@@ -408,12 +408,15 @@ pub struct TrayState {
     pub tunnel: TunnelState, pub transition: Option<Transition>, pub degraded: bool,
     pub proxy: ProxyStatus /*Running | ProxyDown | Stopped*/, pub engine_running: bool,
     pub leak: bool /*monitoring's flag*/, pub kill_switch: bool /*WFP engaged*/,
+    pub same_exit: bool /*wire5-b1: the page's calm same-exit line (other VPN / the run's proof saw it)*/,
     pub restart: Option<(u32, u32)> /*watchdog attempt (n, max)*/, pub public_ip: Option<String>,
     pub proxy_addr: Option<String> /*host:port, never credentials*/, pub down_bps: u64, pub up_bps: u64,
     pub minimize_to_tray: bool /*setting «Сворачивать в трей»*/,
     pub paused: bool /*ks-a: the kill switch holds a drop: menu «Подключить» / «Продолжить без VPN»*/,
 }
-pub enum TrayStatus { Protected, Leak, Off, Starting, ProxyDown, KillSwitch, Restarting, Stopping, Error, Unknown, Paused }
+pub enum TrayStatus { Protected, SameExit, Leak, Off, Starting, ProxyDown, KillSwitch, Restarting, Stopping, Error, Unknown, Paused }
+    // SameExit (wire5-b1): connected, `same_exit`, no leak: amber, «Статус: Выход совпадает с адресом без VPN»,
+    // never «Защищено»; a leak still wins
 pub struct TrayModel { status, tooltip: Vec<Msg>, tooltip_speed: Option<Msg>, items: Vec<TrayItem>,
     turn_off_always: bool /*Stop reads «Выключить «Всегда»»*/, update: Option<Msg> /*«Доступна версия X»*/ }
     // build(&state, quitting) = build_with(&state, &TrayExtras::default(), quitting)
@@ -982,14 +985,17 @@ pub trait HelperApi: 'static {      // context Rc<dyn HelperApi>; absent (demos,
     async fn install_service(&self) -> AppResult<bool>;   // Windows' one prompt; Ok(false) = declined
 }
 pub struct Capability { service: Service, elevated: bool, tunnel, kill_switch, policies, capture: Ability }
-pub enum Service { Missing, Installed, Older { lacks: Vec<Lack> }, Starting, Stopped }   pub enum Lack { AppScope }
+pub enum Service { Missing, Installed, Older { lacks: Vec<Lack> }, Starting, Stopped, Outdated }   pub enum Lack { AppScope }
 impl Service { pub const fn pause_key(&self) -> Option<&'static str> }  // p-live2: Starting / Stopped ->
-    // `ui.helper.{starting,stopped}`: HelperLine (a feature the service carries), TunnelStrip, the tray
+    // `ui.helper.{starting,stopped}`: HelperLine (a feature the service carries), TunnelStrip, the tray;
+    // Outdated (wire5-a1: it refused the app's Hello) -> `ui.helper.outdated`
+impl Service { pub const fn needs_update(&self) -> bool }   // Outdated: «Обновить службу-помощник» offered
 pub enum Ability { Service, InProcess, NeedsService, NotInVersion }   // works() = Service | InProcess
 pub enum Feature { Tunnel, KillSwitch, Policies, Capture }            // Capability::ability(feature)
 pub fn use_capability() -> Option<Capability>;          // live; None without a HelperApi in context
 #[component] pub fn HelperLine(feature: Feature) -> Element;   // the one calm line where a control lives
-#[component] pub fn InstallService() -> Element;               // «Установить службу-помощник» + its error
+#[component] pub fn InstallService(update: bool /*default false*/) -> Element; // «Установить службу-помощник»
+    // (`update`: «Обновить службу-помощник», the same install_service) + its error
 #[component] pub fn TunnelStrip(tunnel_mode: bool) -> Element; // start page: saved Tunnel mode, no service
 ```
 `HelperLine`: nothing while the feature works; `NeedsService`: «… работает через

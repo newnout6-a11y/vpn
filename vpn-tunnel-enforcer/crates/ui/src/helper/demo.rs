@@ -16,17 +16,20 @@ pub enum HelperScene {
     Missing,
     /// An older service: Tunnel mode routes every app until it updates itself.
     Older,
+    /// A service too old to speak to: Tunnel mode waits for its update.
+    Outdated,
     /// No service, the app runs elevated (development, CI): privileged parts run in-process.
     Elevated,
 }
 
 impl HelperScene {
-    /// `installed`, `missing`, `older`, `elevated`.
+    /// `installed`, `missing`, `older`, `outdated`, `elevated`.
     pub fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "installed" => Self::Installed,
             "missing" => Self::Missing,
             "older" => Self::Older,
+            "outdated" => Self::Outdated,
             "elevated" => Self::Elevated,
             _ => return None,
         })
@@ -45,6 +48,7 @@ impl HelperScene {
                 false,
                 Ability::Service,
             ),
+            Self::Outdated => (Service::Outdated, false, Ability::Service),
             Self::Elevated => (Service::Missing, true, Ability::InProcess),
         };
         Capability {

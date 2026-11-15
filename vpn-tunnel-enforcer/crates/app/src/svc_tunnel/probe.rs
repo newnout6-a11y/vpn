@@ -8,15 +8,19 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{ClientDevice, Creds, EnginePref, Loopback, ProxyKind};
+use vpnte_base::types::{ClientDevice, Creds, EnginePref, KillSwitchLevel, Loopback, ProxyKind};
 use vpnte_base::{AppError, AppResult};
 use vpnte_core::net::{HostPort, Route};
 use vpnte_core::settings::{ConnectionMode, Settings};
 use vpnte_core::store::Store;
+use vpnte_engine::clash_api::{ClashApi, ClashEndpoint, Connection};
+use vpnte_engine::routing::process::THIRD_PARTY_CORES;
 use vpnte_engine::routing::rulesets::{RefreshOutcome, RefreshSettings, RouteKind, RuleSetService};
 use vpnte_probes::ip_monitor::IpEvidence;
 use vpnte_probes::key_health::ProbeCtx;
-use vpnte_probes::leak::{CheckInput, CheckReport, Mode, SelfTestResult};
+use vpnte_probes::leak::{
+    CheckInput, CheckReport, ConnRecord, DirectAudit, Mode, SelfTestResult, audit_direct,
+};
 use vpnte_probes::ping::{NetPath, PingSample, PingTarget, ping_all};
 use vpnte_probes::public_ip::IpReader;
 use vpnte_servers::model::ProfileId;
@@ -97,8 +101,8 @@ pub(super) async fn ping(
 
 /// The leak check for the current state (at most 15 s). The upstream is the running session's,
 /// else the configured one; `self_test` is this session's latest background self-test (TUN
-/// sessions, run where their filters live: this elevated process or the helper service). The
-/// direct-out audit is not wired (`direct: None`: "not checked").
+/// sessions, run where their filters live: this elevated process or the helper service); the
+/// direct-out audit reads the session's open engine connections.
 pub(super) async fn leak_check(
     reader: &IpReader,
     settings: &Settings,
@@ -108,6 +112,24 @@ pub(super) async fn leak_check(
     logs: EngineLogs,
     cancel: &CancellationToken,
 ) -> AppResult<CheckReport> {
+    let run = async {
+        let input = check_input(settings, status, evidence, self_test, logs).await;
+        vpnte_probes::leak::leak_check(reader, input, cancel).await
+    };
+    tokio::select! {
+        report = run => Ok(report),
+        () = cancel.cancelled() => Err(AppError::cancelled()),
+    }
+}
+
+/// What the card cannot measure itself, for `status`'s session.
+async fn check_input(
+    settings: &Settings,
+    status: &TunStatus,
+    evidence: IpEvidence,
+    self_test: Option<SelfTestResult>,
+    logs: EngineLogs,
+) -> CheckInput {
     let configured = || settings.proxy_override.as_ref().map(|o| o.addr.clone());
     let mode = match (status.mode, settings.connection_mode) {
         (Some(ModeKind::DirectVpn), _) | (None, ConnectionMode::DirectVpn) => Mode::DirectVpn,
@@ -122,19 +144,63 @@ pub(super) async fn leak_check(
             upstream: configured(),
         },
     };
-    let engine_log = logs.read().await;
-    let input = CheckInput {
+    let smart_ru = settings.smart_ru_split;
+    let (engine_log, direct) = tokio::join!(logs.read(), direct_audit(status, smart_ru));
+    CheckInput {
         mode,
         tunnel_up: status.running,
         evidence,
         self_test,
+        self_test_applies: self_test_applies(status, settings),
         engine_log,
-        direct: None,
-    };
-    tokio::select! {
-        report = vpnte_probes::leak::leak_check(reader, input, cancel) => Ok(report),
-        () = cancel.cancelled() => Err(AppError::cancelled()),
+        direct,
     }
+}
+
+/// The session runs the background self-test: a TUN session with the kill switch on (the gate
+/// of this process's runs and of the helper service's alike).
+fn self_test_applies(status: &TunStatus, settings: &Settings) -> bool {
+    status.capture == Some(CaptureKind::Tun) && settings.kill_switch != KillSwitchLevel::Off
+}
+
+/// The direct-out audit over the running session's open engine connections (`None`: no session
+/// or no answer, "not checked"). The endpoint comes with the status, from the helper service
+/// through its pipe: the loopback API the traffic counters read too (lab live-13 L13-1).
+async fn direct_audit(status: &TunStatus, smart_ru: bool) -> Option<DirectAudit> {
+    let s = status.session.as_ref().filter(|_| status.running)?;
+    let ep = ClashEndpoint {
+        port: s.clash_port,
+        secret: s.clash_secret.clone(),
+    };
+    let read = match ClashApi::new(&ep) {
+        Ok(api) => api.connections().await,
+        Err(e) => Err(e),
+    };
+    let conns = read
+        .inspect_err(|e| tracing::info!(error = %e, "direct-out audit: no connections read"))
+        .ok()?;
+    let records: Vec<ConnRecord> = conns.connections.iter().map(conn_record).collect();
+    Some(audit_direct(&records, smart_ru, &is_core_process))
+}
+
+/// One engine connection as the audit reads it (an empty field is unknown).
+fn conn_record(c: &Connection) -> ConnRecord {
+    let known = |s: &str| Some(s.to_owned()).filter(|s| !s.is_empty());
+    ConnRecord {
+        chains: c.chains.clone(),
+        rule: c.rule.clone(),
+        host: known(&c.metadata.host),
+        destination_ip: c.metadata.destination_ip.parse().ok(),
+        process_path: known(&c.metadata.process_path),
+    }
+}
+
+/// Our engines and the VPN cores routing sends direct: one list for the config and the check.
+fn is_core_process(path: &str) -> bool {
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    THIRD_PARTY_CORES
+        .iter()
+        .any(|core| core.eq_ignore_ascii_case(name))
 }
 
 /// Where the leak check reads the running session's engine lines.
@@ -370,6 +436,7 @@ async fn session_started(status: &mut watch::Receiver<TunStatus>) {
 mod tests {
     use std::time::Duration;
 
+    use vpnte_probes::leak::{CheckStatus, check, summarize};
     use vpnte_tunnel::api::{ProxyEndpoint, SessionEndpoints};
 
     use super::*;
@@ -544,5 +611,127 @@ mod tests {
             .await
             .expect("woken")
             .expect("task");
+    }
+
+    /// A loopback stand-in for the session's Clash API: answers every request with `body`.
+    async fn clash_answering(body: String) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let (mut buf, mut head) = (vec![0u8; 4096], Vec::new());
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match sock.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => head.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        port
+    }
+
+    fn conn(host: &str, dst: &str, process: &str, chain: &str, rule: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": "1", "upload": 0, "download": 0, "start": "", "chains": [chain], "rule": rule,
+            "metadata": {
+                "network": "tcp", "type": "tun/tun-in", "sourceIP": "172.19.0.1",
+                "sourcePort": "50000", "destinationIP": dst, "destinationPort": "443",
+                "host": host, "processPath": process,
+            },
+        })
+    }
+
+    /// Lab live-13 L13-1: a Tunnel check read «—» because the direct-out audit was never wired
+    /// and the self-test, which runs only with the kill switch on, counted as missing. The
+    /// session's open connections are audited now (a rule's direct route and our own cores are
+    /// expected) and the self-test out of its mode is informational: a clean session reads «Нет».
+    #[tokio::test]
+    async fn a_clean_tunnel_session_reads_no_leaks() {
+        let browser = r"C:\Apps\browser.exe";
+        let xray = r"C:\Program Files\VPN Tunnel Enforcer Service\resources\xray.exe";
+        // Public destinations: the audit leaves private and documentation ranges out.
+        let body = serde_json::json!({
+            "downloadTotal": 0, "uploadTotal": 0,
+            "connections": [
+                conn("ya.ru", "77.88.55.242", browser, "direct-out", "rule_set=geoip-ru => route(direct-out)"),
+                conn("", "185.12.13.14", xray, "direct-out", "process_path_regex => route(direct-out)"),
+                conn("example.com", "93.184.215.14", browser, "proxy-out", "final"),
+            ],
+        });
+        let mut tun = status(Some(CaptureKind::Tun), None);
+        let port = clash_answering(body.to_string()).await;
+        if let Some(s) = tun.session.as_mut() {
+            s.clash_port = port;
+        }
+        let settings = Settings {
+            kill_switch: KillSwitchLevel::Off,
+            smart_ru_split: true,
+            ..Settings::default()
+        };
+        let input = check_input(
+            &settings,
+            &tun,
+            IpEvidence::default(),
+            None,
+            EngineLogs::None,
+        )
+        .await;
+        let audit = input
+            .direct
+            .clone()
+            .expect("the session's connections were read");
+        assert_eq!(
+            (
+                audit.by_rule,
+                audit.smart_ru,
+                audit.core,
+                audit.leaked_count
+            ),
+            (1, 1, 1, 0)
+        );
+        assert!(!input.self_test_applies);
+        let items = [
+            check::ipv6_item(None, Some(&[]), true),
+            check::self_test_item(input.self_test.as_ref(), input.self_test_applies),
+            check::direct_out_item(input.direct.as_ref(), true),
+        ];
+        assert_eq!(summarize(&items), CheckStatus::Ok);
+        // With the kill switch on the self-test belongs to the session (until its first run the
+        // card stays «not checked»); Proxy mode has nothing to self-test.
+        let on = Settings {
+            kill_switch: KillSwitchLevel::Standard,
+            ..settings
+        };
+        assert!(self_test_applies(&tun, &on));
+        assert!(!self_test_applies(
+            &status(Some(CaptureKind::Proxy), Some(20808)),
+            &on
+        ));
+    }
+
+    /// An engine that does not answer leaves the audit unknown, never a pass.
+    #[tokio::test]
+    async fn an_unanswered_audit_is_not_a_pass() {
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = dead.local_addr().expect("addr").port();
+        drop(dead);
+        let mut tun = status(Some(CaptureKind::Tun), None);
+        if let Some(s) = tun.session.as_mut() {
+            s.clash_port = port;
+        }
+        assert_eq!(direct_audit(&tun, false).await, None);
+        assert_eq!(direct_audit(&status(None, None), false).await, None);
     }
 }

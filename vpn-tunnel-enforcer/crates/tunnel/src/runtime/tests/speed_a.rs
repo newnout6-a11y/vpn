@@ -310,6 +310,38 @@ async fn a_fresh_connect_keeps_the_gated_echo() {
     assert!(at >= 60_000 + 316, "running at {at}");
 }
 
+/// Lab live-13 L13-2: a user's connect is no background check. After a preserved stop the
+/// programs keep their route into the session (the system proxy points at the kept port), so
+/// with the name's budget full their bytes back through slot A prove the user's start: no echo
+/// and no minute's wait for the handshake slot (the lab's «handshake slot ms=26040»).
+#[tokio::test(start_paused = true)]
+async fn a_users_held_start_without_a_free_slot_is_proven_by_its_traffic() {
+    let w = World::new();
+    lab_steps().on(&w);
+    let gate = Arc::new(RealGate::default());
+    *w.gate.lock() = Some(gate.clone());
+    let h = TunnelHandle::spawn(budget_deps(&w));
+    running_at(&w, &h, slot_req(CaptureKind::Proxy)).await;
+    // Two more checks fill the name's minute.
+    check_takes_a_slot(&gate).await;
+    check_takes_a_slot(&gate).await;
+    let preserved = crate::api::StopOptions {
+        preserve_protection: true,
+        preserve_last: true,
+    };
+    h.stop(preserved).await;
+    w.slot_traffic.lock()[0] = 4096;
+    let before = proofs(&w);
+    let asked = w.now_ms();
+    let at = running_at(&w, &h, slot_req(CaptureKind::Proxy)).await;
+    assert!(
+        at - asked <= 1_500,
+        "running {} ms after the click",
+        at - asked
+    );
+    assert_eq!(proofs(&w), before, "{:?}", w.log());
+}
+
 /// The address the slot config dials (the first Xray config's first outbound address found).
 fn dialled(w: &World) -> String {
     let configs = w.xray_configs.lock();

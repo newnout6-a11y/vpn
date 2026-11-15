@@ -43,6 +43,10 @@ pub struct TrayState {
     pub engine_running: bool,
     /// Monitoring's leak flag: set on a leak, cleared by the next clean check or a disconnect.
     pub leak: bool,
+    /// The exit is the address without our VPN and the start page explains it in its calm line
+    /// (another VPN owns the route, or the run's own proof saw that address): neither protected
+    /// nor a leak (review wire5-b1).
+    pub same_exit: bool,
     /// The WFP kill switch is engaged.
     pub kill_switch: bool,
     /// Watchdog restart attempt `(n, max)` while reconnecting.
@@ -83,6 +87,9 @@ pub struct TrayExtras {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TrayStatus {
     Protected,
+    /// Connected, the exit is the address without our VPN as the start page explains it: a
+    /// neutral state, never «Защищено».
+    SameExit,
     Leak,
     Off,
     Starting,
@@ -106,8 +113,9 @@ pub enum Badge {
 
 impl TrayStatus {
     /// Every status, in declaration order.
-    pub const ALL: [TrayStatus; 11] = [
+    pub const ALL: [TrayStatus; 12] = [
         TrayStatus::Protected,
+        TrayStatus::SameExit,
         TrayStatus::Leak,
         TrayStatus::Off,
         TrayStatus::Starting,
@@ -147,6 +155,7 @@ impl TrayStatus {
             TunnelState::Connected if state.proxy == ProxyStatus::ProxyDown => {
                 TrayStatus::ProxyDown
             }
+            TunnelState::Connected if state.same_exit => TrayStatus::SameExit,
             TunnelState::Connected if state.degraded => TrayStatus::Unknown,
             TunnelState::Connected => TrayStatus::Protected,
             TunnelState::Disconnected => TrayStatus::Off,
@@ -157,6 +166,7 @@ impl TrayStatus {
     pub fn key(self) -> &'static str {
         match self {
             TrayStatus::Protected => "protected",
+            TrayStatus::SameExit => "sameExit",
             TrayStatus::Leak => "leak",
             TrayStatus::Off => "off",
             TrayStatus::Starting => "starting",
@@ -186,6 +196,7 @@ impl TrayStatus {
             self,
             TrayStatus::ProxyDown
                 | TrayStatus::Protected
+                | TrayStatus::SameExit
                 | TrayStatus::Leak
                 | TrayStatus::KillSwitch
                 | TrayStatus::Error

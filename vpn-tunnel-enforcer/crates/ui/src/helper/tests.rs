@@ -38,16 +38,19 @@ fn text(dom: &VirtualDom, key: &str) -> String {
     dom.in_runtime(|| crate::lang::translate_now(&key, &[]))
 }
 
-/// What each scene shows for each feature: (line key or none, install offered).
-fn expected(scene: HelperScene, feature: Feature) -> (Option<&'static str>, bool) {
+/// What each scene shows for each feature: (line key or none, the action's key or none).
+fn expected(scene: HelperScene, feature: Feature) -> (Option<&'static str>, Option<&'static str>) {
     use Feature::*;
     use HelperScene::*;
     match (scene, feature) {
-        (Missing, Tunnel) => (Some("tunnel"), true),
-        (Missing, KillSwitch) => (Some("killSwitch"), true),
-        (Older, Tunnel) => (Some("older.appScope"), false),
-        (_, Capture) | (Missing | Installed | Older, Policies) => (Some("notInVersion"), false),
-        _ => (None, false),
+        (Missing, Tunnel) => (Some("tunnel"), Some("install")),
+        (Missing, KillSwitch) => (Some("killSwitch"), Some("install")),
+        (Outdated, Tunnel | KillSwitch) => (Some("outdated"), Some("update")),
+        (Older, Tunnel) => (Some("older.appScope"), None),
+        (_, Capture) | (Missing | Installed | Older | Outdated, Policies) => {
+            (Some("notInVersion"), None)
+        }
+        _ => (None, None),
     }
 }
 
@@ -58,12 +61,13 @@ async fn each_state_shows_one_calm_line_where_it_applies() {
         HelperScene::Installed,
         HelperScene::Missing,
         HelperScene::Older,
+        HelperScene::Outdated,
         HelperScene::Elevated,
     ] {
         for feature in FEATURES {
             let helper = Rc::new(DemoHelper::new(scene));
             let (dom, seen) = line(Some(helper), feature).await;
-            let (key, install) = expected(scene, feature);
+            let (key, action) = expected(scene, feature);
             let case = format!("{scene:?} / {feature:?}: {:?}", seen.texts);
             assert_eq!(
                 seen.has("data-helper", feature.id()),
@@ -73,7 +77,10 @@ async fn each_state_shows_one_calm_line_where_it_applies() {
             if let Some(key) = key {
                 assert!(seen.shows(&text(&dom, key)), "{case}");
             }
-            assert_eq!(seen.shows(&text(&dom, "install")), install, "{case}");
+            for button in ["install", "update"] {
+                let offered = seen.shows(&text(&dom, button));
+                assert_eq!(offered, action == Some(button), "{case}");
+            }
         }
     }
 }
@@ -143,6 +150,8 @@ fn every_helper_text_exists_in_both_languages_and_is_calm() {
         "notInVersion",
         "install",
         "older.appScope",
+        "outdated",
+        "update",
         "strip.title",
         "strip.body",
     ];
@@ -157,6 +166,20 @@ fn every_helper_text_exists_in_both_languages_and_is_calm() {
         lookup(Lang::Ru, "ui.helper.install").as_deref(),
         Some("Установить службу-помощник")
     );
+}
+
+/// Review wire5-a1: a service too old to speak to says so on the start page's strip, with its
+/// update as the one action (it was shown as current, and the connect said to update the app).
+#[tokio::test]
+async fn the_strip_offers_the_update_of_a_service_too_old_to_speak_to() {
+    crate::test_locales::init_locales();
+    let api: Rc<dyn HelperApi> = Rc::new(DemoHelper::new(HelperScene::Outdated));
+    let props = StripRootProps { tunnel_mode: true };
+    let mut dom = VirtualDom::new_with_props(StripRoot, props).with_root_context(api);
+    let seen = shown(&mut dom).await;
+    assert!(seen.shows(&text(&dom, "outdated")), "{:?}", seen.texts);
+    assert!(seen.shows(&text(&dom, "update")), "{:?}", seen.texts);
+    assert!(!seen.shows(&text(&dom, "install")), "{:?}", seen.texts);
 }
 
 #[test]
