@@ -40,8 +40,32 @@ pub struct SharedInputs {
     /// Which lists the last engine start ran (`None`: Smart RU off), for the app (psmart-b2).
     report: Mutex<Option<RuleSetsWire>>,
     /// The server id and facts of the request in flight (speed3 H2): taken once by its start
-    /// or switch, replaced by the next request, never kept for a restart.
-    facts: Mutex<Option<(String, ServerFacts)>>,
+    /// or switch, replaced by the next request, withdrawn when it ends ([`Offer`]).
+    facts: Mutex<Offered>,
+}
+
+/// The facts on offer and the number of the request that offered them.
+#[derive(Default)]
+struct Offered {
+    request: u64,
+    facts: Option<(String, ServerFacts)>,
+}
+
+/// One request's facts on offer while it runs. Dropped when the request ends (answered or
+/// abandoned): what its run did not take goes, so a later restart or crash recovery of the same
+/// server never dials a hint it did not carry (speed3-a1).
+pub struct Offer {
+    inputs: Arc<SharedInputs>,
+    request: u64,
+}
+
+impl Drop for Offer {
+    fn drop(&mut self) {
+        let mut offered = self.inputs.facts.lock();
+        if offered.request == self.request {
+            offered.facts = None;
+        }
+    }
 }
 
 /// Per Windows user the last set that passed (digest, folder), and the last set that failed its
@@ -80,13 +104,38 @@ impl SharedInputs {
             handed: Mutex::new((String::new(), None)),
             checked: tokio::sync::Mutex::new(Checked::default()),
             report: Mutex::new(None),
-            facts: Mutex::new(None),
+            facts: Mutex::new(Offered::default()),
         }
     }
 
-    /// The facts of the request in flight about server `id` (`None`: it carries none).
-    pub fn offer(&self, facts: Option<(String, ServerFacts)>) {
-        *self.facts.lock() = facts;
+    /// The facts of the request in flight about server `id` (`None`: it carries none), on offer
+    /// until the returned [`Offer`] is dropped.
+    pub fn offer(self: &Arc<Self>, facts: Option<(String, ServerFacts)>) -> Offer {
+        let mut offered = self.facts.lock();
+        offered.request += 1;
+        offered.facts = facts;
+        Offer {
+            inputs: Arc::clone(self),
+            request: offered.request,
+        }
+    }
+
+    /// «Забыть меня»: `owner`'s last accepted Smart RU set is his no more (here and in his
+    /// store note), and a hand-over of his not checked yet is never checked for him: the next
+    /// accepted hand-over prunes his set unless another user's note names it (speed3-a2).
+    pub async fn forget(&self, owner: &str) {
+        let mut checked = self.checked.lock().await;
+        checked.accepted.remove(owner);
+        checked.recalled.remove(owner);
+        {
+            let mut handed = self.handed.lock();
+            if handed.0 == owner {
+                *handed = (String::new(), None);
+            }
+        }
+        if let Some(store) = &self.store {
+            handover::forget(store, owner).await;
+        }
     }
 
     /// Which Smart RU lists the last engine start ran; `None` while Smart RU is off.
@@ -259,11 +308,11 @@ impl InputsSource for SharedInputs {
     }
 
     fn server_facts(&self, profile_id: &str) -> ServerFacts {
-        let mut facts = self.facts.lock();
-        match facts.take() {
+        let mut offered = self.facts.lock();
+        match offered.facts.take() {
             Some((id, given)) if id == profile_id => given,
             other => {
-                *facts = other;
+                offered.facts = other;
                 ServerFacts::default()
             }
         }

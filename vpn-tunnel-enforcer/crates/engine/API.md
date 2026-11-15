@@ -737,7 +737,9 @@ pub async fn accept(files: &RuleSetFiles, engine: &Path, store: &Path, reference
     // (matcher keys alone: no port, network, invert or logical rule).
 pub async fn recall(store: &Path, owner: &str) -> Option<(String, PathBuf)>;  // owner's noted set, while
     // its folder still hashes to it (fixlists-a5)
-pub fn prune_store(store: &Path, keep: &[&Path]);      // blocking; removes the other gen-* folders
+pub fn prune_store(store: &Path, keep: &[&Path]);      // blocking; removes the other gen-* folders, but
+    // never one a user's note (`accepted-*`) names (speed3-a2: another user's last accepted set)
+pub async fn forget(store: &Path, owner: &str);       // «Забыть меня»: owner's note goes
 ```
 
 ## `apps` — installed applications (split-tunnel picker)

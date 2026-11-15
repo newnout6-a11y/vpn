@@ -146,6 +146,11 @@ pub(super) struct Actor {
     /// failed over: its success is announced as [`TunnelEvent::FailedOver`] before its
     /// `StartFinished`.
     pub failing_over: Option<(String, FailoverCause)>,
+    /// The start in flight is `retry`'s crash recovery of the server that crashed: the one
+    /// restart whose server carried this user's traffic until a moment ago. A restart built
+    /// from `last` (config change, adaptive move, a sibling) keeps `last`'s origin and is none
+    /// (speed3-a4).
+    pub recovering: bool,
     pub restart_due: Option<Instant>,
     /// The server (profile id) whose crash showed an outbound fault, and until when crash
     /// restarts keep away from it (freeze window, `crash` module).
@@ -214,6 +219,7 @@ impl Actor {
             failover_tried: false,
             slow: 0,
             failing_over: None,
+            recovering: false,
             restart_due: None,
             quiet: None,
             tried: None,

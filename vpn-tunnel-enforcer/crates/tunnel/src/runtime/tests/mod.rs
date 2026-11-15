@@ -727,12 +727,27 @@ impl Capture for FakeCapture {
         }
         Ok(())
     }
-    async fn wait_gone(&self, _plan: &CapturePlan, _t: Duration, _c: &CancellationToken) -> bool {
+    /// As the real wait (`wait_released`): the adapter goes at once (`gone`) or after 200 ms
+    /// (`slow_gone`, to overlap a second command with a running stop); one that lingers costs
+    /// the whole timeout `t` (speed3-a5: a test of the restart's bound must see it).
+    async fn wait_gone(&self, _plan: &CapturePlan, t: Duration, c: &CancellationToken) -> bool {
         self.0.note("wait-gone");
-        if self.0.slow_gone.load(Ordering::SeqCst) {
-            tokio::time::sleep(Duration::from_millis(200)).await;
+        let goes_after = match (
+            self.0.gone.load(Ordering::SeqCst),
+            self.0.slow_gone.load(Ordering::SeqCst),
+        ) {
+            (false, _) => None,
+            (true, slow) => Some(Duration::from_millis(if slow { 200 } else { 0 })),
+        };
+        let in_time = goes_after.is_some_and(|after| after <= t);
+        let waits = goes_after.map_or(t, |after| after.min(t));
+        if waits.is_zero() {
+            return in_time;
         }
-        self.0.gone.load(Ordering::SeqCst)
+        tokio::select! {
+            () = c.cancelled() => false,
+            () = tokio::time::sleep(waits) => in_time,
+        }
     }
     async fn check(&self, _proof: &CaptureProof) -> CaptureCheck {
         CaptureCheck::Clear

@@ -11,6 +11,7 @@ use vpnte_tunnel::api::{
 };
 
 use super::Host;
+use super::inputs::Offer;
 use crate::pipe::ClientInfo;
 use crate::proto::{
     ErrorCode, ExitWire, KeptSession, Reply, Request, ServerUpstream, StartReceiptWire,
@@ -106,12 +107,12 @@ impl Host {
     }
 
     /// Validates a start / restart / switch, applies its kill-switch settings and inputs, and
-    /// returns the runtime's request.
+    /// returns the runtime's request with its facts on offer until the request ends.
     async fn prepare(
         &self,
         client: &ClientInfo,
         start: &TunnelStart,
-    ) -> Result<StartRequest, WireError> {
+    ) -> Result<(StartRequest, Offer), WireError> {
         if let Some(msg) = &self.deps.refuse_tunnel {
             return Err(refused(AppError::msg(ErrorKind::Permission, msg.clone())));
         }
@@ -124,14 +125,14 @@ impl Host {
         let level = settings.level;
         let (kill_switch, inputs) = (self.deps.kill_switch.clone(), self.deps.inputs.clone());
         let (routing, owner) = (start.routing.clone(), client.user.clone());
-        self.serialized(async move {
-            kill_switch.apply(settings).await?;
-            inputs.set(&routing, level, &owner);
-            inputs.offer(facts);
-            Ok(())
-        })
-        .await?;
-        Ok(start_request(start, level))
+        let offer = self
+            .serialized(async move {
+                kill_switch.apply(settings).await?;
+                inputs.set(&routing, level, &owner);
+                Ok(inputs.offer(facts))
+            })
+            .await?;
+        Ok((start_request(start, level), offer))
     }
 
     pub(super) async fn handle(
@@ -148,7 +149,7 @@ impl Host {
                 "service.pipe.badRequest",
             )),
             Request::Start(start) => {
-                let req = self.prepare(client, &start).await?;
+                let (req, _offer) = self.prepare(client, &start).await?;
                 self.owns_session(client, &start);
                 let receipt = runtime.start(req, cancel.clone()).await;
                 let receipt = receipt.map_err(tunnel_failed)?;
@@ -156,7 +157,7 @@ impl Host {
                 Ok(Reply::Started(Some(StartReceiptWire::from(&receipt))))
             }
             Request::Restart(start) => {
-                let req = self.prepare(client, &start).await?;
+                let (req, _offer) = self.prepare(client, &start).await?;
                 self.owns_session(client, &start);
                 let reason = "restart requested by the app".to_owned();
                 let opts = RestartOptions {
@@ -180,7 +181,7 @@ impl Host {
                     validate::server(server).map_err(refused)?;
                 }
                 let facts = facts_of(restart.server.as_ref())?;
-                self.deps.inputs.offer(facts);
+                let _offer = self.deps.inputs.offer(facts);
                 let profile = restart.server.as_ref().map(vpn_profile);
                 let receipt = runtime
                     .restart_adaptive(restart.mode, restart.reason.clone(), profile)
@@ -190,7 +191,7 @@ impl Host {
                 Ok(Reply::Started(Some(StartReceiptWire::from(&receipt))))
             }
             Request::Switch(start) => {
-                let req = self.prepare(client, &start).await?;
+                let (req, _offer) = self.prepare(client, &start).await?;
                 self.owns_session(client, &start);
                 let owner = cancel.clone();
                 let is_owner = Arc::new(move || !owner.is_cancelled());
@@ -319,6 +320,7 @@ impl Host {
         self.forget_session(Some(&client.user));
         // speed3 H3: the server names his ended sessions resolved go with him.
         vpnte_core::resolve::forget(&client.user);
+        self.deps.inputs.forget(&client.user).await;
         Ok(Reply::Done { removing })
     }
 

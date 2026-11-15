@@ -54,6 +54,35 @@ async fn two_users_never_see_each_others_names() {
     forget(b);
 }
 
+/// speed3-a3: «Забыть меня» while the service keeps the user's session running: its names
+/// still serve it, but its end never brings them back as his recent names (nor anyone's);
+/// another user's running session keeps its owner.
+#[tokio::test]
+async fn a_forgotten_users_running_session_leaves_no_names() {
+    let _one = SESSIONS.lock().await;
+    let name = "forgotten.s3-09.invalid";
+    let (a, b) = ("S-1-5-21-1-2-3-1003", "S-1-5-21-1-2-3-1004");
+    let names = HashMap::from([(name.to_owned(), vec![ip("203.0.113.26")])]);
+    *KEPT.lock() = Some(Kept {
+        started: 79_000,
+        owner: Some(a.to_owned()),
+        names,
+    });
+    forget(b);
+    let owner = || KEPT.lock().as_ref().and_then(|k| k.owner.clone());
+    assert_eq!(owner().as_deref(), Some(a));
+    forget(a);
+    assert_eq!(owner(), None);
+    assert_eq!(
+        kept(name),
+        Some(vec![ip("203.0.113.26")]),
+        "still serves its run"
+    );
+    end_session();
+    assert_eq!(recent_of(Some(a), name), None);
+    assert_eq!(recent_of(Some(b), name), None);
+}
+
 /// S3-09 (e): a start that failed with a remembered answer drops it: the next one asks.
 #[tokio::test]
 async fn a_failed_start_drops_its_remembered_names() {

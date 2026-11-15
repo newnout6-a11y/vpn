@@ -52,6 +52,7 @@ pub use engines::{
     Started,
 };
 pub use handle::TunnelHandle;
+pub use switch_ops::dial_failed;
 
 /// The inputs of one start that live in the user's stores, as one plain serialisable snapshot
 /// (in-process the app reads its stores; in the service the client sends it).

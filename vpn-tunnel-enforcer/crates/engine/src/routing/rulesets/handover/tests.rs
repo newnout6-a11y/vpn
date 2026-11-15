@@ -210,3 +210,31 @@ async fn a_users_accepted_set_is_his_own() {
     assert_eq!(again, Ok(dir.clone()), "the same bytes, the same folder");
     assert_eq!(recall(&store, other).await, Some((set.digest(), dir)));
 }
+
+/// speed3-a2: an accepted hand-over prunes only the sets no user's note names: another user's
+/// last accepted set survives it (the service has not recalled his note since it started), a
+/// set nobody notes goes, and a forgotten user's set goes with the next prune.
+#[tokio::test]
+async fn a_prune_keeps_every_users_noted_set() {
+    let t = TempDir::new("handover-prune");
+    let store = t.path().join("rulesets");
+    let other = "S-1-5-21-1-1002";
+    let digests = ["a", "b", "c", "d"].map(|d| d.repeat(64));
+    let dirs = digests.each_ref().map(|d| folder(&store, d));
+    for dir in &dirs {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    remember(&store, USER, &digests[0]).await;
+    remember(&store, other, &digests[1]).await;
+    prune_store(&store, &[dirs[3].as_path()]);
+    assert_eq!(
+        dirs.each_ref().map(|d| d.is_dir()),
+        [true, true, false, true]
+    );
+    forget(&store, other).await;
+    prune_store(&store, &[dirs[3].as_path()]);
+    assert_eq!(
+        dirs.each_ref().map(|d| d.is_dir()),
+        [true, false, false, true]
+    );
+}

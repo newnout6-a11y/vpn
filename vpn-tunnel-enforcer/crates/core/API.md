@@ -413,7 +413,8 @@ pub fn keep_resolved(started: UnixMs, answers: &[(String, Vec<IpAddr>)]); // the
 pub fn end_session();                                // the kept names go (recent for RECENT_FOR more)
 pub const RECENT_FOR: Duration;                      // 10 min (speed3 S3-09 (a))
 pub fn owned_by(owner: impl Fn() -> Option<String> + Send + Sync + 'static); // service: whose names (SID)
-pub fn forget(owner: &str);                          // «Забыть меня»: that user's recent names go (H3)
+pub fn forget(owner: &str);                          // «Забыть меня»: that user's recent names go (H3);
+                                                     // his running session's are nobody's (speed3-a3)
 pub fn drop_names(names: &[String]);                 // a failed start: kept / recent answers go
 pub fn remember(name: &str, addrs: Vec<IpAddr>);     // an answer of the lookup ahead, as recent
 pub fn remembers(name: &str) -> bool;                // a recent answer would be used now
@@ -431,7 +432,8 @@ app's hints) and `drop_names` when a start fails (not a cancel). `resolve_server
 and, lab L11-4, of its group's likely picks before the click) asks only 1.1.1.1, 9.9.9.9, 8.8.8.8
 and 94.140.14.140 over DoH: no name to resolve first, no SNI, nothing to the ISP's or the OS's
 resolver; it remembers its answer for the owner (`remember`) and, while it runs, is shared: a
-second `resolve_ahead` of the name or a `recall` joins it instead of asking again. `recall` (a
+second `resolve_ahead` of the name or a `recall` joins it instead of asking again. Every lookup ahead
+shares one connection pool (lab L12-5: the app looks a provider graph's names up together). `recall` (a
 switch's stage) answers a name from the running session's kept addresses or the owner's recent
 ones, else waits for the owner's ahead lookup of it in flight; `None` otherwise. Unfiltered: the
 caller filters it as a looked-up answer (`may_be_server`).

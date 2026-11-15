@@ -131,8 +131,9 @@ async fn a_tun_restart_waits_for_the_dead_adapter_with_the_block_armed() {
     assert_eq!(w.count("release"), 0, "{:?}", w.log());
 }
 
-/// speed3 S3-01: a lingering adapter never holds the restart back (best effort, the next run
-/// takes another alias) and never releases the block.
+/// speed3 S3-01: a lingering adapter holds the restart no longer than the 300 ms wait (best
+/// effort, the next run takes another alias) and never releases the block. speed3-a5: the fake
+/// adapter lingers for the whole wait, as the real one does, so a longer wait fails here.
 #[tokio::test(start_paused = true)]
 async fn a_lingering_adapter_does_not_hold_the_restart() {
     let w = World::new();
@@ -145,7 +146,11 @@ async fn a_lingering_adapter_does_not_hold_the_restart() {
     let crashed = w.now_ms();
     w.core(0).crash();
     started(&mut events, 2).await;
-    assert!(w.ms("spawn:4101") <= crashed + 300);
+    let spawn = w.ms("spawn:4101");
+    assert!(
+        near(spawn, crashed + 300),
+        "spawn {spawn} vs crash {crashed}"
+    );
     assert_eq!(w.count("release"), 0);
 }
 

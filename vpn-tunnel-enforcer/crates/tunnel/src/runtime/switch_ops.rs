@@ -22,8 +22,8 @@ use super::capture::{Capture, CaptureProof, EngineParts};
 use super::engines::{CoreProc, EchoFailure, Engines, core_budget, echo_failed, echo_failure};
 use super::{Timings, config};
 use crate::api::{
-    Mode, NameHint, Origin, OwnerCheck, Slot, StartRequest, SwitchOutcome, SwitchPhase,
-    SwitchReceipt, TunnelEvent, VpnProfile,
+    Mode, NameHint, Origin, OwnerCheck, Slot, StartRequest, SwitchFailure, SwitchOutcome,
+    SwitchPhase, SwitchReceipt, TunnelEvent, VpnProfile,
 };
 use crate::switch::{SwitchOps, run_protected_switch};
 
@@ -83,6 +83,19 @@ struct RuntimeSwitch<'a> {
     staged_at: Option<tokio::time::Instant>,
     /// The candidate's names answered from this process's memory (lab L11-4).
     recalled: Vec<String>,
+}
+
+/// The switch failed where its candidate was dialled (staged, probed, confirmed): an address it
+/// dialled from memory or from the app's hint may be what failed, so it goes (S3-09 (e); the app
+/// drops its hints by the same rule, speed3-a1).
+pub fn dial_failed(receipt: &SwitchReceipt) -> bool {
+    let dialled = |f: &SwitchFailure| {
+        matches!(
+            f.phase,
+            SwitchPhase::Stage | SwitchPhase::Probe | SwitchPhase::Confirm
+        )
+    };
+    receipt.outcome == SwitchOutcome::Failed && receipt.failures.iter().any(dialled)
 }
 
 /// How long a candidate proven by its own traffic may take to show it.
@@ -655,14 +668,7 @@ impl Actor {
             // Another listener may have claimed the standby port: reallocate next time.
             ops.slots.suspect = true;
         }
-        let dial_failed = receipt.outcome == SwitchOutcome::Failed
-            && receipt.failures.iter().any(|f| {
-                matches!(
-                    f.phase,
-                    SwitchPhase::Stage | SwitchPhase::Probe | SwitchPhase::Confirm
-                )
-            });
-        if dial_failed && !ops.recalled.is_empty() {
+        if dial_failed(&receipt) && !ops.recalled.is_empty() {
             // S3-09 (e): an answer from memory that did not carry the candidate goes; the next
             // try asks the resolvers.
             vpnte_core::resolve::drop_names(&ops.recalled);

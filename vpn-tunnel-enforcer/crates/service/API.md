@@ -189,10 +189,16 @@ bundled Mozilla roots and the Windows root store instead (revocation was soft-fa
 speed3 H2: `prepare` hands a request's server facts to `SharedInputs::offer(Some((id, facts)))`; the
 runtime takes them once through `InputsSource::server_facts(id)` (a fresh user's switch selects
 first; Lane A's start reads the hints); never kept for a restart, never in the resume memory.
+speed3-a1: `offer(self: &Arc<Self>, ..) -> Offer`, held by the request (Start, Restart, Switch,
+RestartAdaptive) until it ends: dropping it withdraws what the run did not take, so a later crash
+recovery or `RestartWithLast` never dials a hint it did not carry (a later request's offer stays).
 speed3 P-1: `SharedInputs::set(routing, level, owner_sid)`: the accepted hand-over and its store note
 (`accepted-<hash of the SID>`) are per Windows user; a user whose own set fails runs his own last
 accepted set, else the pinned files, never another user's (`handover::{accept, recall}` take the owner).
-speed3 H3: `ForgetMe` also drops the user's recent server names (`vpnte_core::resolve::forget(sid)`).
+speed3 H3: `ForgetMe` also drops the user's recent server names (`vpnte_core::resolve::forget(sid)`),
+and (speed3-a2) `SharedInputs::forget(sid)`: his accepted set in memory, a hand-over of his not
+checked yet, and his store note (`handover::forget`), so the next accepted hand-over prunes his set
+unless another user's note names it. A prune keeps every set a user's note names.
 Lab live-9 L9-2: `SharedInputs::set(self: &Arc<Self>, ..)` starts the check of a handed-over set in
 the background the moment it arrives (start, restart or `Inputs` request); a start's snapshot finds it
 accepted by digest or waits only for the rest (`Smart RU lists ready ms=..`; the accept logs `ms`).

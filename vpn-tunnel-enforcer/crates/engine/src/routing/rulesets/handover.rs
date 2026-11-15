@@ -134,6 +134,16 @@ pub async fn recall(store: &Path, owner: &str) -> Option<(String, PathBuf)> {
     holds(&dir, digest).await.then(|| (digest.to_owned(), dir))
 }
 
+/// «Забыть меня»: `owner`'s note goes, so no prune keeps his last accepted set for him any
+/// more (another user's note may still name the same folder).
+pub async fn forget(store: &Path, owner: &str) {
+    if let Err(err) = tokio::fs::remove_file(note(store, owner)).await
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(%err, "the user's accepted rule sets note not removed");
+    }
+}
+
 /// `gen-<digest>-c<checks>`: a set stored by older checks is never reused (fixlists-a7).
 fn folder(store: &Path, digest: &str) -> PathBuf {
     let short = digest.get(..16).unwrap_or(digest);
@@ -217,20 +227,39 @@ async fn holds(dir: &Path, digest: &str) -> bool {
         .is_some_and(|set| set.digest() == digest)
 }
 
-/// Removes the generations in `store` other than `keep` (blocking; call before an engine
-/// start, never while an engine may read an older one: pass the running one in `keep`).
+/// Removes the generations in `store` other than `keep` and those a user's note names
+/// (blocking; call before an engine start, never while an engine may read an older one: pass
+/// the running one in `keep`). Speed3-a2: one user's accepted hand-over never takes another
+/// user's last accepted set, which the service has not recalled since it started.
 pub fn prune_store(store: &Path, keep: &[&Path]) {
+    let noted = noted(store);
     let gens = std::fs::read_dir(store).into_iter().flatten().flatten();
     for entry in gens {
         let path = entry.path();
         let ours = entry.file_name().to_string_lossy().starts_with(GEN_PREFIX);
         if ours
             && !keep.contains(&path.as_path())
+            && !noted.contains(&path)
             && let Err(err) = std::fs::remove_dir_all(&path)
         {
             tracing::warn!(%err, "old handed-over rule sets not removed");
         }
     }
+}
+
+/// The folders the users' notes in `store` name (blocking).
+fn noted(store: &Path) -> Vec<PathBuf> {
+    let prefix = format!("{ACCEPTED}-");
+    let notes = std::fs::read_dir(store).into_iter().flatten().flatten();
+    notes
+        .map(|entry| entry.path())
+        .filter(|path| {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            name.is_some_and(|n| n.starts_with(&prefix)) && path.extension().is_none()
+        })
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .map(|digest| folder(store, digest.trim()))
+        .collect()
 }
 
 #[cfg(test)]

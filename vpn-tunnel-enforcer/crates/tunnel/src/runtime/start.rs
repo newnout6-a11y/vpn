@@ -524,6 +524,7 @@ impl Actor {
         let guard = self.capture.guard(&plan);
         let beside = runs_beside(
             req,
+            self.recovering,
             self.failing_over.is_some(),
             work.prior.is_some(),
             guard,
@@ -531,7 +532,7 @@ impl Actor {
         // Lab live-10 L10-2: a crash recovery's server carried this user's traffic until the
         // crash, and the programs reconnect through the new core (the system proxy and the
         // TUN's routes stay): bytes back through slot A prove it as well as an echo does.
-        let own_traffic = beside && req.origin == Origin::Recovery && self.failing_over.is_none();
+        let own_traffic = beside && self.recovering;
         let (core_up, core_seen) = oneshot::channel();
         let mut core_seen = own_traffic.then_some(core_seen);
         let mut proving = None;
@@ -843,15 +844,18 @@ const TRAFFIC_POLL: Duration = Duration::from_millis(100);
 /// block holds everything without a session, so a TUN start changes nothing for the user but
 /// its speed (S3-08, first commit: «Стандартный» and «Выкл» wait for the owner, question 32).
 /// A failover's sibling never carried this user's traffic: with the kill switch Off it keeps
-/// the order, nobody is routed into an unproven server.
+/// the order, nobody is routed into an unproven server. Neither does a restart built from the
+/// last start after a recovery (an adaptive move to a sibling, a config change): it inherits
+/// the recovery's origin but is no crash recovery (`recovering`: `retry`'s own start).
 fn runs_beside(
     req: &StartRequest,
+    recovering: bool,
     failing_over: bool,
     prior: bool,
     guard: KillSwitchLevel,
 ) -> bool {
     let strict_tun = req.capture == CaptureKind::Tun && guard == KillSwitchLevel::Strict;
-    let own = req.capture == CaptureKind::Proxy || req.origin == Origin::Recovery || strict_tun;
+    let own = req.capture == CaptureKind::Proxy || recovering || strict_tun;
     (!failing_over && own) || (prior && guard != KillSwitchLevel::Off)
 }
 

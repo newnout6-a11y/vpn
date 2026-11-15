@@ -93,8 +93,16 @@ pub fn end_session() {
     names.extend(ended.names.into_iter().map(|(n, addrs)| (n, (addrs, now))));
 }
 
-/// The names of `owner`'s ended sessions go («Забыть меня»; speed3 H3, the helper service).
+/// The names of `owner`'s ended sessions go («Забыть меня»; speed3 H3, the helper service). A
+/// session of his that still runs (the service keeps it until another user takes over) is
+/// nobody's from now on: its names serve it while it runs and never become his recent names
+/// when it ends (speed3-a3).
 pub fn forget(owner: &str) {
+    if let Some(kept) = KEPT.lock().as_mut()
+        && kept.owner.as_deref() == Some(owner)
+    {
+        kept.owner = None;
+    }
     if let Some(recent) = RECENT.lock().as_mut() {
         recent.remove(owner);
     }

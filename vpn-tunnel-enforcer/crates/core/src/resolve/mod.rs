@@ -180,13 +180,7 @@ pub async fn resolve_ahead(name: &str) -> Result<Vec<IpAddr>, ResolveError> {
         return Err(ResolveError::InvalidName);
     };
     let lookup = async {
-        let foreign = UPSTREAMS
-            .into_iter()
-            .filter(chain::ip_literal_doh)
-            .collect();
-        let found = Chain::new(foreign, Net::new(), STAGGER, UPSTREAM_LIMIT)
-            .resolve_dial(&name, &|_| true)
-            .await;
+        let found = foreign().resolve_dial(&name, &|_| true).await;
         // Remembered before the lookup leaves the flight: no asker falls between the two.
         if let Ok(addrs) = &found {
             remember(&name, addrs.clone());
@@ -220,6 +214,17 @@ pub fn may_be_server(ip: IpAddr) -> bool {
 fn last_known() -> &'static LastKnown {
     static LAST_KNOWN: LazyLock<LastKnown> = LazyLock::new(LastKnown::default);
     &LAST_KNOWN
+}
+
+/// The foreign IP-literal DoH resolvers of [`resolve_ahead`]: one connection pool for every
+/// lookup ahead (lab L12-5: a provider graph's names are looked up together, one TLS
+/// connection instead of one per name).
+fn foreign() -> &'static Chain<Net> {
+    static FOREIGN: OnceLock<Chain<Net>> = OnceLock::new();
+    FOREIGN.get_or_init(|| {
+        let foreign = UPSTREAMS.into_iter().filter(chain::ip_literal_doh);
+        Chain::new(foreign.collect(), Net::new(), STAGGER, UPSTREAM_LIMIT)
+    })
 }
 
 /// The process-wide chain: one connection pool and one remembered winner for every caller.

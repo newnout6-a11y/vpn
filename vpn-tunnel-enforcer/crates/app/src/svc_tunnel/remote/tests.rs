@@ -22,8 +22,8 @@ use vpnte_service::proto::{ProtectionWire, Request};
 use vpnte_service::users::Users;
 use vpnte_tunnel::api::{
     CaptureKind, EngineRun, ExitInfo, Mode, Origin, OwnerCheck, RestartOptions, Runtime,
-    StartReceipt, StartRequest, StopOptions, StopReceipt, SwitchReceipt, TunError, TunStatus,
-    TunStatusKind, TunnelEvent, VpnProfile,
+    ServerFacts, StartReceipt, StartRequest, StopOptions, StopReceipt, SwitchReceipt, TunError,
+    TunStatus, TunStatusKind, TunnelEvent, VpnProfile,
 };
 use vpnte_tunnel::runtime::{InputsSource, UserInputs};
 use vpnte_winnet::wfp::{ProtectionSettings, RemoveReport};
@@ -34,6 +34,7 @@ use crate::svc_core::docs::ProtectionDoc;
 
 mod fresh;
 mod handover;
+mod hints;
 mod takeover;
 
 /// A runtime that runs whatever it is asked to, at once.
@@ -46,6 +47,12 @@ pub(super) struct FakeRuntime {
     kept: AtomicU32,
     /// Starts fail (the server out of reach), as a failed start ends in the real runtime.
     fail: std::sync::atomic::AtomicBool,
+    /// The service's inputs, read at every start and switch as the real runtime reads them.
+    inputs: std::sync::OnceLock<Arc<SharedInputs>>,
+    /// The server facts (speed3 H2) each start and switch found, in order.
+    facts: Mutex<Vec<ServerFacts>>,
+    /// What a switch answers (`None`: no switch in place).
+    switch: Mutex<Option<SwitchReceipt>>,
 }
 
 impl FakeRuntime {
@@ -57,13 +64,28 @@ impl FakeRuntime {
             stops: AtomicU32::new(0),
             kept: AtomicU32::new(0),
             fail: std::sync::atomic::AtomicBool::new(false),
+            inputs: std::sync::OnceLock::new(),
+            facts: Mutex::new(Vec::new()),
+            switch: Mutex::new(None),
         })
+    }
+
+    /// Takes the server facts `req` finds in the service's inputs, as the real runtime does.
+    fn read_facts(&self, req: &StartRequest) {
+        if let (Mode::DirectVpn { profile }, Some(inputs)) = (&req.mode, self.inputs.get()) {
+            self.facts.lock().push(inputs.server_facts(&profile.id));
+        }
     }
 }
 
 #[async_trait]
 impl Runtime for FakeRuntime {
-    async fn start(&self, _: StartRequest, _: CancellationToken) -> Result<StartReceipt, TunError> {
+    async fn start(
+        &self,
+        req: StartRequest,
+        _: CancellationToken,
+    ) -> Result<StartReceipt, TunError> {
+        self.read_facts(&req);
         let generation = u64::from(self.starts.fetch_add(1, Ordering::SeqCst)) + 1;
         let _ = self.events.send(TunnelEvent::StartBegan { generation });
         if self.fail.load(Ordering::SeqCst) {
@@ -157,11 +179,12 @@ impl Runtime for FakeRuntime {
     }
     async fn switch_upstream(
         &self,
-        _: StartRequest,
+        next: StartRequest,
         _: CancellationToken,
         _: OwnerCheck,
     ) -> Option<SwitchReceipt> {
-        None
+        self.read_facts(&next);
+        self.switch.lock().clone()
     }
     fn status(&self) -> watch::Receiver<TunStatus> {
         self.status.subscribe()

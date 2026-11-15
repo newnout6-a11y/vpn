@@ -2,13 +2,15 @@
 //! with the upstream down the traffic waits inside the tunnel instead of leaking, and the status
 //! only says so. Each runs as its own task and reports transitions to the actor.
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::Msg;
+use vpnte_base::types::Loopback;
+use vpnte_base::{AppResult, Msg};
 use vpnte_core::net::HostPort;
 use vpnte_engine::clash_api::ClashEndpoint;
 
@@ -104,9 +106,28 @@ struct EgressSource {
     engines: Arc<dyn Engines>,
     clash: ClashEndpoint,
     confirmations: Option<Arc<dyn Confirmations>>,
-    /// The session's `mixed` inbound under the proxy capture; `None`: the TUN's default route.
+    /// The session's `mixed` inbound under the proxy capture; `None`: the TUN.
     via: Option<u16>,
+    /// The core's probe inbound (`live-check-in`, credentials required): the TUN's idle probe.
+    check: Option<Loopback>,
     carried: Carried,
+}
+
+impl EgressSource {
+    /// The idle probe's echo (budget [`IDLE_PROBE`]): under the proxy capture through the
+    /// session's mixed inbound, the way the user's programs go; under the TUN through the core's
+    /// probe inbound to the selected upstream, as a switch's confirm (lab L11-3): through the
+    /// capture the echo looked its service's name up on the core's DoH connection, which a
+    /// select or a network change may just have cut, and the user's rules applied to it.
+    async fn echo(&self, cancel: &CancellationToken) -> AppResult<IpAddr> {
+        match (self.via, &self.check) {
+            (None, Some(check)) => {
+                let (engines, creds) = (&self.engines, check.creds.as_ref());
+                (engines.egress_core(check.port, creds, IDLE_PROBE, None, cancel)).await
+            }
+            (via, _) => self.engines.egress(via, IDLE_PROBE, cancel).await,
+        }
+    }
 }
 
 /// Direct VPN: there is no local proxy to probe (and our own sockets may be blocked by the kill
@@ -153,7 +174,7 @@ async fn egress_watch(
             || may_probe && {
                 let started = Instant::now();
                 probed = Some(started);
-                let probe = src.engines.egress(src.via, IDLE_PROBE, &cancel).await;
+                let probe = src.echo(&cancel).await;
                 // Answers without an address came back through the server all the same.
                 let alive = match &probe {
                     Ok(_) => true,
@@ -227,6 +248,7 @@ impl Actor {
                     clash: s.clash.clone(),
                     confirmations,
                     via: s.proof.port,
+                    check: s.listeners.probe.clone(),
                     carried: s.carried.clone(),
                 };
                 tokio::spawn(egress_watch(src, t.clone(), verdicts, s.watch.clone()));

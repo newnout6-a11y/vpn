@@ -17,11 +17,11 @@ use vpnte_tunnel::api::{
 
 use super::{Remote, start, tun_error, unexpected};
 
-/// The name a server's hint is for: its own host name (never an IP literal).
-fn hinted_name(server: &vpnte_service::proto::ServerUpstream) -> Option<String> {
-    match &server.profile.server {
-        vpnte_profiles::model::Host::Domain(name) => Some(name.to_string()),
-        vpnte_profiles::model::Host::Ip(_) => None,
+/// The names `start` carries hints for.
+fn hinted(start: &TunnelStart) -> Vec<String> {
+    match &start.upstream {
+        Upstream::Server(server) => server.hints.iter().map(|h| h.name.clone()).collect(),
+        Upstream::LocalProxy { .. } => Vec::new(),
     }
 }
 
@@ -34,30 +34,58 @@ fn same_upstream(kept: &KeptSession, upstream: &Upstream) -> bool {
 }
 
 impl Remote {
-    /// The service's start from `req`, with the warnings only the app can give.
-    async fn tunnel_start(&self, req: &StartRequest) -> Result<(TunnelStart, Vec<Msg>), TunError> {
+    /// The service's start from `req`, with the warnings only the app can give (`cancel`: the
+    /// request is called off; it goes without waiting for a hint).
+    async fn tunnel_start(
+        &self,
+        req: &StartRequest,
+        cancel: &CancellationToken,
+    ) -> Result<(TunnelStart, Vec<Msg>), TunError> {
         let inputs = self.0.inputs.snapshot().await?;
         let protection = self.0.protection.read(|d| d.settings.clone());
         let notes = start::inactive_warnings(&inputs, self.protocol());
         let mut start = start::tunnel_start(req, &inputs, protection)?;
-        // S3-09 (b): the name resolved before the click, for this start only (the service
-        // filters it like a looked-up answer; a service older than the hints never sees it).
-        if let (Upstream::Server(server), Some(ahead)) = (&mut start.upstream, self.0.ahead.get())
-            && let Some(name) = hinted_name(server)
-        {
-            server.hints = ahead.hint(&name).into_iter().collect();
+        // S3-09 (b), lab L12-5: the addresses of every name the server's graph dials, resolved
+        // before the click (a lookup still in flight then is joined, up to a second), for this
+        // request only (the service filters them like looked-up answers; a service older than
+        // the hints never sees them).
+        if let (Upstream::Server(server), Some(ahead)) = (&mut start.upstream, self.0.ahead.get()) {
+            let device = server.device.unwrap_or_default();
+            let names = crate::svc_tunnel::warm::graph_hosts(&server.profile, device);
+            server.hints = tokio::select! {
+                () = cancel.cancelled() => Vec::new(),
+                hints = ahead.hints(&names) => hints,
+            };
         }
         Ok((start, notes))
     }
 
-    /// The start that carried a hint failed: the hint goes (S3-09 (e)).
-    fn failed_with(&self, start: &TunnelStart) {
-        if let (Upstream::Server(server), Some(ahead)) = (&start.upstream, self.0.ahead.get())
-            && !server.hints.is_empty()
-            && let Some(name) = hinted_name(server)
-        {
-            ahead.forget(&name);
+    /// A request that carried hints for `names` failed: they go (S3-09 (e), speed3-a1), the next
+    /// request asks the resolvers.
+    fn failed_with(&self, names: &[String]) {
+        if let Some(ahead) = self.0.ahead.get() {
+            for name in names {
+                ahead.forget(name);
+            }
         }
+    }
+
+    /// The start-like reply to `request` (`hinted`: the names it carries hints for, dropped when
+    /// it fails; a cancelled request proves nothing).
+    async fn started_with(
+        &self,
+        request: Request,
+        cancel: &CancellationToken,
+        notes: Vec<Msg>,
+        hinted: &[String],
+    ) -> Result<Option<StartReceipt>, TunError> {
+        let receipt = self.started(request, cancel, notes).await;
+        if let Err(err) = &receipt
+            && err.error.kind != vpnte_base::ErrorKind::Cancelled
+        {
+            self.failed_with(hinted);
+        }
+        receipt
     }
 
     /// The service's routing inputs from the app's current settings; the warnings only the app
@@ -158,9 +186,9 @@ impl Runtime for Remote {
     ) -> Result<StartReceipt, TunError> {
         // A new connection parks a session the service kept for this user (a crashed window).
         self.link().await.map_err(tun_error)?;
-        let (start, notes) = self.tunnel_start(&req).await?;
+        let (start, notes) = self.tunnel_start(&req, &cancel).await?;
         let kept = self.0.state.lock().kept.clone();
-        let sent = start.clone();
+        let hinted = hinted(&start);
         let request = match kept {
             Some(kept) if same_upstream(&kept, &start.upstream) => return self.take_over().await,
             // Another upstream: the kept run is replaced, its kill switch held in between.
@@ -174,14 +202,7 @@ impl Runtime for Remote {
                 Request::Start(Box::new(start))
             }
         };
-        let receipt = self
-            .started(request, &cancel, notes)
-            .await
-            .inspect_err(|err| {
-                if err.error.kind != vpnte_base::ErrorKind::Cancelled {
-                    self.failed_with(&sent);
-                }
-            })?;
+        let receipt = self.started_with(request, &cancel, notes, &hinted).await?;
         receipt.ok_or_else(|| AppError::internal(std::io::Error::other("no receipt")).into())
     }
 
@@ -205,9 +226,11 @@ impl Runtime for Remote {
         opts: RestartOptions,
     ) -> Result<StartReceipt, TunError> {
         self.unpark();
-        let (start, notes) = self.tunnel_start(&next).await?;
+        let (start, notes) = self.tunnel_start(&next, &opts.cancel).await?;
+        let hinted = hinted(&start);
+        let request = Request::Restart(Box::new(start));
         let receipt = self
-            .started(Request::Restart(Box::new(start)), &opts.cancel, notes)
+            .started_with(request, &opts.cancel, notes, &hinted)
             .await?;
         receipt.ok_or_else(|| AppError::internal(std::io::Error::other("no receipt")).into())
     }
@@ -244,7 +267,7 @@ impl Runtime for Remote {
         cancel: CancellationToken,
         _is_owner: OwnerCheck,
     ) -> Option<SwitchReceipt> {
-        let (mut start, notes) = self.tunnel_start(&next).await.ok()?;
+        let (mut start, notes) = self.tunnel_start(&next, &cancel).await.ok()?;
         // speed3 S3-07: the user's own switch to a server a young, fast key check found online
         // selects first and proves once after, on the same evidence the in-process runtime reads
         // through `Failover::fresh`. Never an automatic switch (a service before protocol 5
@@ -255,6 +278,7 @@ impl Runtime for Remote {
         {
             server.fresh = crate::svc_auto::fresh_server(servers, &server.id);
         }
+        let hinted = hinted(&start);
         let reply = tokio::select! {
             () = cancel.cancelled() => return None,
             reply = self.call(Request::Switch(Box::new(start))) => reply,
@@ -262,6 +286,9 @@ impl Runtime for Remote {
         match reply {
             Ok(Reply::Switched(receipt)) => receipt.map(|wire| {
                 let mut receipt = SwitchReceipt::from(wire);
+                if vpnte_tunnel::runtime::dial_failed(&receipt) {
+                    self.failed_with(&hinted);
+                }
                 receipt.warnings.extend(notes);
                 receipt
             }),

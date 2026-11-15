@@ -57,8 +57,10 @@ async fn only_a_users_switch_carries_the_fresh_evidence() {
     let dir = TempDir::new(&format!("remote-fresh-{n}"));
     let listener = Listener::bind(&pipe_config(&pipe)).expect("private pipe");
     let inputs = Arc::new(SharedInputs::new(None));
+    let runtime = FakeRuntime::new();
+    let _ = runtime.inputs.set(inputs.clone());
     let host = Host::new(HostDeps {
-        runtime: FakeRuntime::new(),
+        runtime: runtime.clone(),
         kill_switch: kill_switch(),
         inputs: inputs.clone(),
         users: Arc::new(Users::open(&dir.0.join("users.json"))),
@@ -81,12 +83,13 @@ async fn only_a_users_switch_carries_the_fresh_evidence() {
         (Origin::Recovery, false),
     ] {
         let next = switch_to(&id, origin);
-        // The fake runtime cannot switch in place; the service took the request's facts first.
+        // The fake runtime cannot switch in place; it read the request's facts first.
         let receipt = r
             .switch_upstream(next, CancellationToken::new(), owner.clone())
             .await;
         assert!(receipt.is_none());
-        assert_eq!(inputs.server_facts(&id.0).fresh, fresh, "{origin:?}");
+        let seen = runtime.facts.lock().pop().expect("read by the switch");
+        assert_eq!(seen.fresh, fresh, "{origin:?}");
     }
     cancel.cancel();
 }

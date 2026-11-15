@@ -342,12 +342,12 @@ async fn a_hand_over_is_checked_when_it_arrives() {
 /// that server, once; a request without facts clears them, another server never sees them.
 #[test]
 fn a_requests_server_facts_are_handed_out_once() {
-    let inputs = SharedInputs::with_store(None, None);
+    let inputs = Arc::new(SharedInputs::with_store(None, None));
     let facts = ServerFacts {
         fresh: true,
         hints: Vec::new(),
     };
-    inputs.offer(Some(("srv-1".into(), facts.clone())));
+    let _offer = inputs.offer(Some(("srv-1".into(), facts.clone())));
     assert_eq!(inputs.server_facts("srv-2"), ServerFacts::default());
     assert_eq!(
         inputs.server_facts("srv-1"),
@@ -355,9 +355,28 @@ fn a_requests_server_facts_are_handed_out_once() {
         "kept for its own server"
     );
     assert_eq!(inputs.server_facts("srv-1"), ServerFacts::default(), "once");
-    inputs.offer(Some(("srv-1".into(), facts)));
-    inputs.offer(None);
+    let _first = inputs.offer(Some(("srv-1".into(), facts)));
+    let _next = inputs.offer(None);
     assert_eq!(inputs.server_facts("srv-1"), ServerFacts::default());
+}
+
+/// speed3-a1: the facts a request's run did not take go when the request ends, so a crash
+/// recovery or a restart of the last start never dials a hint it did not carry; an earlier
+/// request's end never withdraws a later request's facts.
+#[test]
+fn a_requests_facts_go_when_it_ends() {
+    let inputs = Arc::new(SharedInputs::with_store(None, None));
+    let facts = ServerFacts {
+        fresh: true,
+        hints: Vec::new(),
+    };
+    drop(inputs.offer(Some(("srv-1".into(), facts.clone()))));
+    assert_eq!(inputs.server_facts("srv-1"), ServerFacts::default());
+    let earlier = inputs.offer(Some(("srv-1".into(), facts.clone())));
+    let later = inputs.offer(Some(("srv-1".into(), facts.clone())));
+    drop(earlier);
+    assert_eq!(inputs.server_facts("srv-1"), facts, "the later request's");
+    drop(later);
 }
 
 /// speed3 P-1 (security review): the set one Windows user handed over is his alone. Another

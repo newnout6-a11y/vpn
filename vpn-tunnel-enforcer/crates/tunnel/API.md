@@ -597,9 +597,13 @@ held back (its handshakes are another client's). p-speed: traffic within 30 s be
 exit proof got nothing back (`EchoFailure::NoReply`) with a failover available marks that server
 quiet, so the sibling comes next (lab live-8 L8-2). Watchdogs never stop the
 tunnel (`ProxyDown` / `Running`); the direct-VPN watchdog with neither traffic nor outside evidence
-sends one echo through the session (`Engines::egress`, 5 s per request) before it counts a failure
-and lets an answer stand 120 s; a silent session is asked at most once a minute (lab live-7 F3: an
-idle session is not a dead one).
+sends one echo through the session (5 s per request) before it counts a failure and lets an answer
+stand 120 s; a silent session is asked at most once a minute (lab live-7 F3: an idle session is not a
+dead one). Under the proxy capture the echo goes through the session's mixed inbound
+(`Engines::egress`), under the TUN through the core's probe inbound `live-check-in`
+(`Engines::egress_core`, its credentials, no settle; p-fix-review6, as a switch's confirm since lab
+L11-3: no lookup on the core's DoH connection a select or a network change may have cut, none of
+the user's rules).
 Speed (p-speed): every start step logs its time at info (`capture prepared`, `upstream planned`,
 `capture began`, `slot A accepts`, `slot A exit proven` / `native exit proof`, `sing-box ready`,
 `capture ready`, each `echo request`). A provider graph whose entry is a balancer proves its exit
@@ -609,7 +613,9 @@ through the tunnel (its members exit from several addresses, lab live-8 L8-1). U
 protection already holds (a recovery or a protected restart, guard != Off) the core and its capture
 start beside slot A's exit proof; a first start proves first (conn5). speed3 (Lane A): a Proxy
 start, a crash recovery of the same server and a TUN start under «Строгий» run beside too (a
-failover sibling with the kill switch Off keeps the order), and the inputs snapshot and routing are
+failover sibling with the kill switch Off keeps the order; so does a restart built from the last
+start after a recovery, `restart_with_last` / `restart_adaptive`, which inherits its `Recovery`
+origin: only the crash restart itself, `Actor::recovering`, counts, speed3-a4), and the inputs snapshot and routing are
 part of the core's way up, so the proof runs from slot A's accept. A crash recovery also takes the
 server's own traffic through slot A of the new core (bytes back, Clash API) as its proof; when the
 handshake budget has no slot at once the echo waits for one only after 3 s without traffic (lab
@@ -667,7 +673,9 @@ recorded exit until its proof. `stage` takes the request's hints for the candida
 (b); filtered like a lookup), then what this process holds (lab L11-4,
 `vpnte_core::resolve::recall`: the app's names resolved ahead, a recent session's; an ahead lookup in
 flight is joined for up to 1 s; filtered alike) and asks only the rest through `dns-bootstrap-in`; a
-switch that fails at stage, probe or confirm drops the recalled names (`drop_names`). Step lines:
+switch that fails at stage, probe or confirm drops the recalled names (`drop_names`).
+`pub fn runtime::dial_failed(&SwitchReceipt) -> bool` is that rule (outcome `Failed` with a failure at
+`Stage` / `Probe` / `Confirm`); the app drops the hints a switch carried by it (speed3-a1). Step lines:
 `switch admitted`, `candidate resolved` (`ms`, `asked`), `candidate config built` (ms), `switch: the
 candidate's balancer settles first` (`ms`), `switch: the candidate carries traffic`, `switch: the
 candidate's echo got nothing back` (probe first; select first keeps `switch: the fresh candidate …`).

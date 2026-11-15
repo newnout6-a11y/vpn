@@ -67,12 +67,13 @@ async fn unverified_release_continues_on_a_fresh_identity() {
         .await
         .unwrap();
     w.gone.store(false, Ordering::SeqCst);
+    // The old adapter outlives the release wait (the fake lingers for all of it).
+    let opts = RestartOptions {
+        release_timeout: Duration::from_millis(50),
+        ..RestartOptions::default()
+    };
     let receipt = h
-        .restart_protected(
-            "config change: dns".into(),
-            local_req(),
-            RestartOptions::default(),
-        )
+        .restart_protected("config change: dns".into(), local_req(), opts)
         .await
         .expect("restart");
     assert!(
@@ -873,6 +874,51 @@ async fn with_the_kill_switch_off_a_failover_sibling_proves_before_its_core() {
     // The sibling: its proof before its core.
     assert!(at("egress-via:203.0.113.11") < at("spawn:4102"), "{log:?}");
     assert!(h.status().borrow().running);
+}
+
+/// speed3-a4: with the kill switch Off only the crash recovery of the server that crashed runs
+/// its core beside the proof. A later restart built from that recovery's start (here the
+/// adaptive move to a sibling) inherits its origin but keeps the order: the sibling proves its
+/// exit before its core takes anyone's traffic (conn5).
+#[tokio::test]
+async fn after_a_recovery_a_sibling_restart_still_proves_before_its_core() {
+    let w = World::new();
+    *w.guard.lock() = vpnte_base::types::KillSwitchLevel::Off;
+    w.proof_ms.store(150, Ordering::SeqCst);
+    let h = spawn(&w);
+    let mut events = h.subscribe();
+    let req = StartRequest {
+        kill_switch: vpnte_base::types::KillSwitchLevel::Off,
+        ..vpn_req(XRAY_KEY, EnginePref::Xray)
+    };
+    h.start(req, CancellationToken::new()).await.unwrap();
+    drain(&mut events);
+    let first = w.log().len();
+    w.core(0).crash();
+    let recovered = TunnelEvent::StartFinished {
+        generation: 2,
+        ok: true,
+    };
+    until(&mut events, |e| *e == recovered).await;
+    let at = |log: &[String], what: &str| log.iter().position(|l| l == what);
+    let all = w.log();
+    let recovery = &all[first..];
+    assert!(
+        at(recovery, "spawn:4101") < at(recovery, "proof-done"),
+        "{recovery:?}"
+    );
+    let mode = vpnte_base::types::AdaptiveMode::Baseline;
+    let next = sibling(XRAY_KEY_2, "c");
+    h.restart_adaptive(mode, "fallback".into(), Some(next))
+        .await
+        .expect("restart");
+    let all = w.log();
+    let moved = &all[first + recovery.len()..];
+    assert!(at(moved, "egress-via:203.0.113.11").is_some(), "{moved:?}");
+    assert!(
+        at(moved, "proof-done") < at(moved, "spawn:4102"),
+        "{moved:?}"
+    );
 }
 
 /// b8: a crash inside the freeze window fails over at once. A candidate that does not start is

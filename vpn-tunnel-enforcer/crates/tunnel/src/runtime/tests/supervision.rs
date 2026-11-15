@@ -56,6 +56,19 @@ async fn local_proxy_watchdog_down_and_up() {
 
 struct Always;
 
+/// The idle probes through the core's probe inbound (`live-check-in`) and through the capture
+/// itself: under the TUN every one goes the first way (lab L11-3, p-fix-review6).
+fn idle_probes(w: &World) -> (usize, usize) {
+    let config = w.configs.lock()[0].clone();
+    let inbounds = config["inbounds"].as_array().cloned().unwrap_or_default();
+    let probe = inbounds
+        .iter()
+        .find(|i| i["tag"] == vpnte_engine::tags::PROBE_IN)
+        .and_then(|i| i["listen_port"].as_u64())
+        .expect("a direct VPN core has its probe inbound");
+    (w.count(&format!("egress:{probe}")), w.count("egress"))
+}
+
 impl Confirmations for Always {
     fn confirmed_within(&self, _age: Duration) -> bool {
         true
@@ -76,7 +89,7 @@ async fn direct_vpn_watchdog_needs_evidence() {
     h.start(req, CancellationToken::new()).await.unwrap();
     until(&mut events, is_down).await;
     // One probe, then the checks count failures without dialling the silent server again.
-    assert_eq!(w.count("egress"), 1, "{:?}", w.log());
+    assert_eq!(idle_probes(&w), (1, 0), "{:?}", w.log());
     let warning = h.status().borrow().warning.clone().expect("reason");
     assert_eq!(warning.key, "tunnel.runtime.watchdog.upstreamDown");
     assert_eq!(warning.args[0].1, "Fake C");
@@ -96,7 +109,9 @@ async fn direct_vpn_watchdog_needs_evidence() {
 
 /// Lab live-7 F3: a healthy session nobody uses is not dead: with no traffic and no outside
 /// evidence the watchdog asks through the session once, and its answer stands for a while
-/// (one probe, not one per check).
+/// (one probe, not one per check). Under the TUN it asks through the core's probe inbound,
+/// never through the capture: no name lookup on the core's DoH connection, no user rules
+/// (lab L11-3).
 #[tokio::test]
 async fn an_idle_session_is_judged_by_a_probe() {
     let w = World::new();
@@ -109,7 +124,7 @@ async fn an_idle_session_is_judged_by_a_probe() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!drain(&mut events).iter().any(is_down));
     assert!(h.status().borrow().proxy_reachable);
-    assert_eq!(w.count("egress"), 1, "{:?}", w.log.lock());
+    assert_eq!(idle_probes(&w), (1, 0), "{:?}", w.log());
 }
 
 /// Speed audit conn2: a crash right after the session carried traffic is no frozen server, so

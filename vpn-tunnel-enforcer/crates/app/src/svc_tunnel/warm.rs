@@ -8,21 +8,26 @@
 //! change, after the rows changed (a check wrote its results) and on a network change; never
 //! while browsing the list. The answer serves a Proxy start or switch in this process (the
 //! resolver's memory) and travels as the hints of a Tunnel start to the helper service (H2), for
-//! that start only.
+//! that start only. Lab L12-5: the first Tunnel start after install looked up the graph names
+//! the hint missed for 951 ms, so every host name of the selected server's graph is resolved
+//! ahead (together), and a start joins the lookups still in flight at the click for [`JOIN`].
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::future::join_all;
 use parking_lot::Mutex;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use vpnte_base::types::ClientDevice;
 use vpnte_core::resolve;
+use vpnte_profiles::model::Profile;
 use vpnte_servers::model::ServerRow;
 use vpnte_servers::store::{Servers, ServersEvent};
-use vpnte_tunnel::api::{MAX_HINT_ADDRS, NameHint};
+use vpnte_tunnel::api::{MAX_HINT_ADDRS, MAX_HINT_NAMES, NameHint};
 use vpnte_winnet::adapters::{self, NetChange};
 
 use crate::svc_auto::likely_picks;
@@ -32,6 +37,9 @@ use crate::svc_auto::likely_picks;
 const NET_SETTLE: Duration = Duration::from_millis(1500);
 /// How many names of the selected server's group are resolved ahead besides its own (lab L11-4).
 const LIKELY: usize = 4;
+/// How long a Tunnel start waits for lookups ahead still in flight at the click (lab L12-5: the
+/// service's own cold lookup of a graph's names took 951 ms).
+const JOIN: Duration = Duration::from_secs(1);
 
 /// Server names resolved ahead (the selected server's and its likely picks'), with when.
 #[derive(Default)]
@@ -45,30 +53,53 @@ impl Ahead {
         let name = name.trim().to_ascii_lowercase();
         let answers = self.answers.lock();
         let (addrs, at) = answers.get(&name)?;
-        (at.elapsed() < resolve::RECENT_FOR).then(|| NameHint {
-            addrs: addrs.iter().copied().take(MAX_HINT_ADDRS).collect(),
-            name,
-        })
+        (at.elapsed() < resolve::RECENT_FOR).then(|| hint_of(name, addrs))
     }
 
-    /// A start that carried the hint for `name` failed: it goes (S3-09 (e)); the next start
-    /// asks the resolvers.
+    /// The hints for `names` (at most [`MAX_HINT_NAMES`]): each answer of at most 10 min ago,
+    /// else what its lookup ahead still in flight brings within [`JOIN`] (joined, never asked
+    /// again: no new lookup at the click).
+    pub(crate) async fn hints(&self, names: &[String]) -> Vec<NameHint> {
+        let until = Instant::now() + JOIN;
+        let each = names.iter().take(MAX_HINT_NAMES).map(|name| async move {
+            if let Some(hint) = self.hint(name) {
+                return Some(hint);
+            }
+            let joined = tokio::time::timeout_at(until, resolve::recall(name)).await;
+            let addrs = joined.ok().flatten().filter(|a| !a.is_empty())?;
+            Some(hint_of(name.trim().to_ascii_lowercase(), &addrs))
+        });
+        join_all(each).await.into_iter().flatten().collect()
+    }
+
+    /// Holds `addrs` for `name` as an answer ahead of now.
+    #[cfg(test)]
+    pub(crate) fn hold(&self, name: &str, addrs: Vec<IpAddr>) {
+        let name = name.trim().to_ascii_lowercase();
+        self.answers.lock().insert(name, (addrs, Instant::now()));
+    }
+
+    /// A request that carried the hint for `name` failed: it goes (S3-09 (e), speed3-a1), from
+    /// here and from this process's resolver memory; the next start asks the resolvers.
     pub(crate) fn forget(&self, name: &str) {
-        self.answers
-            .lock()
-            .remove(&name.trim().to_ascii_lowercase());
+        let name = name.trim().to_ascii_lowercase();
+        self.answers.lock().remove(&name);
+        resolve::drop_names(&[name]);
     }
 
-    /// Resolves the selected server's name and its likely picks' ([`likely_names`]), each
-    /// unless it was within 10 min.
+    /// Resolves the selected server's graph names and its likely picks' ([`likely_names`]), all
+    /// at once, each unless it was within 10 min.
     async fn likely(&self, servers: &Servers) {
         let Some(active) = servers.active().filter(|a| !a.fallback) else {
             return;
         };
-        let names = servers.read(|doc| likely_names(&active.row, &doc.profiles));
-        for (name, selected) in names {
-            self.ahead(name, selected).await;
-        }
+        // Read (and decrypted) outside the list's lock.
+        let own = row_hosts(&active.row);
+        let names = servers.read(|doc| likely_names(&own, &active.row, &doc.profiles));
+        let each = names
+            .into_iter()
+            .map(|(name, selected)| self.ahead(name, selected));
+        join_all(each).await;
     }
 
     /// One name ahead unless it was within 10 min (`resolve_ahead` remembers the answer).
@@ -92,23 +123,72 @@ impl Ahead {
     }
 }
 
-/// The names to resolve ahead: the selected row's (`true`), then those of its group's likely
-/// picks ([`likely_picks`]) up to [`LIKELY`] more; host names only, lower case, each once.
-fn likely_names(selected: &ServerRow, rows: &[ServerRow]) -> Vec<(String, bool)> {
-    let picks = likely_picks(rows, selected).into_iter();
-    let hosts = std::iter::once((selected, true)).chain(picks.map(|r| (r, false)));
-    let mut names: Vec<(String, bool)> = Vec::new();
-    for (row, selected) in hosts {
-        let name = row.server.trim().to_ascii_lowercase();
-        let literal = name.trim_matches(['[', ']']).parse::<IpAddr>().is_ok();
-        if !literal && !name.is_empty() && names.iter().all(|(n, _)| *n != name) {
-            names.push((name, selected));
-        }
-        if names.iter().filter(|(_, s)| !s).count() == LIKELY {
-            break;
+/// `addrs` as the hint for `name` (at most [`MAX_HINT_ADDRS`]).
+fn hint_of(name: String, addrs: &[IpAddr]) -> NameHint {
+    NameHint {
+        addrs: addrs.iter().copied().take(MAX_HINT_ADDRS).collect(),
+        name,
+    }
+}
+
+/// Every host name `profile`'s Xray graph dials, as the runtime plans its start
+/// (`ProxyGraph::hosts`: a provider graph's members, an XHTTP download host), lower case, each
+/// once, at most [`MAX_HINT_NAMES`]; its own host name when no graph is built for it here.
+pub(crate) fn graph_hosts(profile: &Profile, device: ClientDevice) -> Vec<String> {
+    let hosts = match vpnte_engine::xray_config::proxy_graph(profile, device) {
+        Ok(graph) => graph.hosts(),
+        Err(_) => match &profile.server {
+            vpnte_profiles::model::Host::Domain(name) => vec![name.to_string()],
+            vpnte_profiles::model::Host::Ip(_) => Vec::new(),
+        },
+    };
+    let mut names: Vec<String> = Vec::new();
+    for host in hosts {
+        push_name(&mut names, &host);
+    }
+    names.truncate(MAX_HINT_NAMES);
+    names
+}
+
+/// `name` lower case at the end of `names`, unless it is an IP literal, empty or there already.
+fn push_name(names: &mut Vec<String>, name: &str) {
+    let name = name.trim().to_ascii_lowercase();
+    let literal = name.trim_matches(['[', ']']).parse::<IpAddr>().is_ok();
+    if !literal && !name.is_empty() && !names.contains(&name) {
+        names.push(name);
+    }
+}
+
+/// The selected row's graph names ([`graph_hosts`]; its own name when its key cannot be read).
+fn row_hosts(row: &ServerRow) -> Vec<String> {
+    let hosts = row.run_profile().map(|p| graph_hosts(&p, row.device));
+    match hosts {
+        Ok(hosts) if !hosts.is_empty() => hosts,
+        _ => {
+            let mut own = Vec::new();
+            push_name(&mut own, &row.server);
+            own
         }
     }
-    names
+}
+
+/// The names to resolve ahead: the selected row's graph names `own` (`true`), then those of its
+/// group's likely picks ([`likely_picks`]) up to [`LIKELY`] more; host names only, lower case,
+/// each once.
+fn likely_names(own: &[String], selected: &ServerRow, rows: &[ServerRow]) -> Vec<(String, bool)> {
+    let mut names: Vec<String> = Vec::new();
+    for name in own {
+        push_name(&mut names, name);
+    }
+    let selected_names = names.len();
+    for row in likely_picks(rows, selected) {
+        if names.len() - selected_names == LIKELY {
+            break;
+        }
+        push_name(&mut names, &row.server);
+    }
+    let marked = names.into_iter().enumerate();
+    marked.map(|(i, name)| (name, i < selected_names)).collect()
 }
 
 /// Resolves ahead at once, then after every selection change, network change and settled row
@@ -229,7 +309,7 @@ mod tests {
         rows.push(row("literal", "g", "203.0.113.4", Some(5)));
         rows.push(row("unchecked", "g", "new.example", None));
         rows.push(row("elsewhere", "h", "other.example", Some(1)));
-        let names = likely_names(&selected, &rows);
+        let names = likely_names(&row_hosts(&selected), &selected, &rows);
         let want = [
             ("sel.example", true),
             ("r5.example", false),
@@ -239,5 +319,68 @@ mod tests {
         ];
         let got: Vec<_> = names.iter().map(|(n, s)| (n.as_str(), *s)).collect();
         assert_eq!(got, want);
+    }
+
+    /// Lab L12-5: a provider graph's every member name is resolved ahead with the selected
+    /// server's own and hinted at its start: lower case, each once, IP literals left out.
+    #[test]
+    fn every_name_of_the_selected_graph_is_resolved_ahead() {
+        let member = |tag: &str, host: &str| {
+            serde_json::json!({ "tag": tag, "protocol": "vless",
+                "settings": { "vnext": [{ "address": host, "port": 443,
+                    "users": [{ "id": "00000000-0000-4000-8000-000000000003" }] }] },
+                "streamSettings": { "network": "tcp", "security": "tls",
+                    "tlsSettings": { "serverName": "front.example" } } })
+        };
+        let doc = serde_json::json!({ "remarks": "Fake graph",
+            "outbounds": [member("proxy-1", "A.example"), member("proxy-2", "b.example"),
+                          member("proxy-3", "a.example"), member("proxy-4", "203.0.113.5")],
+            "routing": { "balancers": [{ "tag": "l1", "selector": ["proxy-"],
+                                         "strategy": { "type": "random" } }],
+                         "rules": [{ "type": "field", "network": "tcp,udp", "balancerTag": "l1" }] } });
+        let found = vpnte_profiles::json::parse_json(&doc);
+        let profile = found.profiles.into_iter().next().expect("a provider graph");
+        assert!(profile.native_xray.is_some());
+        let hosts = graph_hosts(&profile, ClientDevice::Pc);
+        assert_eq!(hosts, ["a.example", "b.example"]);
+        let selected = row("sel", "g", "a.example", Some(100));
+        let rows = vec![selected.clone(), row("r", "g", "r.example", Some(90))];
+        let names = likely_names(&hosts, &selected, &rows);
+        let got: Vec<_> = names.iter().map(|(n, s)| (n.as_str(), *s)).collect();
+        assert_eq!(
+            got,
+            [
+                ("a.example", true),
+                ("b.example", true),
+                ("r.example", false)
+            ]
+        );
+    }
+
+    /// Lab L12-5: a start's hints come from this process's resolver memory too (where a lookup
+    /// ahead in flight lands, `resolve::recall`), not only from the answers already held here;
+    /// a name nobody resolved costs the start no wait.
+    #[tokio::test(start_paused = true)]
+    async fn a_start_takes_the_hints_the_resolvers_memory_holds() {
+        let ahead = Ahead::default();
+        let (held, remembered) = ("held.l12-5.invalid", "remembered.l12-5.invalid");
+        ahead.hold(held, vec![IpAddr::from([203, 0, 113, 41])]);
+        resolve::remember(remembered, vec![IpAddr::from([203, 0, 113, 42])]);
+        let names = [held, remembered, "unknown.l12-5.invalid"].map(String::from);
+        let asked = Instant::now();
+        let hints = ahead.hints(&names).await;
+        assert_eq!(
+            asked.elapsed(),
+            Duration::ZERO,
+            "nothing in flight: no wait"
+        );
+        let got: Vec<_> = hints
+            .iter()
+            .map(|h| (h.name.as_str(), h.addrs.len()))
+            .collect();
+        assert_eq!(got, [(held, 1), (remembered, 1)]);
+        ahead.forget(remembered);
+        let left = ahead.hints(&names).await;
+        assert_eq!(left.len(), 1, "forgotten here and in its memory");
     }
 }

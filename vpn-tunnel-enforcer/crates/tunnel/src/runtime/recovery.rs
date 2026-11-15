@@ -240,7 +240,9 @@ impl Actor {
             let ms = step.elapsed().as_millis();
             tracing::info!(gone, ms, "restart: the dead capture interface waited for");
         }
+        self.recovering = true;
         let result = self.start_run(req, &op, &[]).await;
+        self.recovering = false;
         self.clear_op();
         if let Err(e) = result
             && !op.is_cancelled()
