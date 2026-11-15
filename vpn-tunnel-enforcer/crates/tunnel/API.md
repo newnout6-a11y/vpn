@@ -659,18 +659,22 @@ pub async fn run_protected_switch<O: SwitchOps + Send>(previous: Slot, candidate
 The runtime's ops (speed3): admission compares `Capture::compat` keys (every routing input, S3-10). A
 user's switch (`Origin::User`) to a server with fresh evidence (`InputsSource::server_facts` or
 `Failover::fresh`) skips the probe: select, then one proof within `Timings::confirm_candidate` (2 s, no
-hedge): the candidate's own downloads, else one echo through the core; any exit counts. Failure
-restores the previous slot as before. Every other switch probes first; a spent handshake budget proves
-by traffic. A slot without a recorded exit (proven by traffic) is re-proven by any answer.
-Lab L11-3: every proof after the select (candidate and the retained previous slot) echoes through the
-core (`Engines::egress_core`): under the proxy capture its mixed inbound, under the TUN the probe
-inbound `live-check-in` (always to the selector, no name lookup on the core's DoH connection the
-select cut, none of the user's rules). The probe-first candidate's confirm also counts its own
-downloads (any exit) and waits out an echo that got nothing back until `2 x confirm_candidate`; a
-balanced candidate whose observatory has not judged yet (`settle_of`, counted from the slot's start)
-is asked again at its settle point and given 8 s after it, in both orders. A staged slot has no
-recorded exit until its proof. `stage` takes the request's hints for the candidate's names (S3-10
-(b); filtered like a lookup), then what this process holds (lab L11-4,
+hedge, never longer): the candidate's own downloads, else one echo through the core; any exit counts.
+A fresh candidate whose balancer has not judged its members yet is probed first instead (speed3-b2:
+a frozen candidate holds the user's traffic for 2 s at most). Failure restores the previous slot as
+before. Every other switch probes first; a spent handshake budget proves by traffic. A slot without a
+recorded exit (proven by traffic) is re-proven by any answer.
+Every proof after the select (candidate and the retained previous slot) echoes through the core's
+probe inbound `live-check-in` in both captures (`Engines::egress_core`, its credentials; always to the
+selector, ahead of every rule of the user's): never the capture's own way in (speed3-b1: the proxy
+capture's mixed inbound follows the user's «Не через прокси» and direct rules; lab L11-3: through the
+TUN the echo's lookup rode the core's DoH connection the select cut). A session without that inbound
+is not switched in place (every direct-VPN run has one). The probe-first candidate's confirm also
+counts its own downloads (any exit) and waits out an echo that got nothing back until
+`2 x confirm_candidate`; a balanced candidate whose observatory has not judged yet (`settle_of`,
+counted from the slot's start) is asked again at its settle point and given 8 s after it. A staged
+slot has no recorded exit until its proof. `stage` takes the request's hints for the candidate's
+names (S3-10 (b); filtered like a lookup), then what this process holds (lab L11-4,
 `vpnte_core::resolve::recall`: the app's names resolved ahead, a recent session's; an ahead lookup in
 flight is joined for up to 1 s; filtered alike) and asks only the rest through `dns-bootstrap-in`; a
 switch that fails at stage, probe or confirm drops the recalled names (`drop_names`).
@@ -678,7 +682,8 @@ switch that fails at stage, probe or confirm drops the recalled names (`drop_nam
 `Stage` / `Probe` / `Confirm`); the app drops the hints a switch carried by it (speed3-a1). Step lines:
 `switch admitted`, `candidate resolved` (`ms`, `asked`), `candidate config built` (ms), `switch: the
 candidate's balancer settles first` (`ms`), `switch: the candidate carries traffic`, `switch: the
-candidate's echo got nothing back` (probe first; select first keeps `switch: the fresh candidate …`).
+candidate's echo got nothing back` (probe first; select first keeps `switch: the fresh candidate …`),
+`switch: the fresh candidate's balancer has not settled: probe first`.
 
 ## Main flows
 ```rust

@@ -72,13 +72,14 @@ struct RuntimeSwitch<'a> {
     by_traffic: bool,
     /// speed3 S3-07 (owner default 1): a user's switch to a server with fresh evidence selects
     /// first and proves once after it ([`RuntimeSwitch::confirm_fresh`]); every other switch
-    /// keeps its probe.
+    /// keeps its probe, and so does a candidate whose balancer has not judged its members yet
+    /// (speed3-b2: `probe` clears this).
     fresh: bool,
     /// speed3 S3-10 (b): the app's addresses for the candidate's names (this switch only).
     hints: Vec<NameHint>,
-    /// The core's probe inbound (`live-check-in`): the TUN's proofs after the select go through
-    /// it (lab L11-3).
-    check: Option<&'a Loopback>,
+    /// The core's probe inbound (`live-check-in`): every proof after the select goes through it
+    /// (lab L11-3, speed3-b1).
+    check: &'a Loopback,
     /// When the candidate's slot accepted: its balancer's observatory runs from about then.
     staged_at: Option<tokio::time::Instant>,
     /// The candidate's names answered from this process's memory (lab L11-4).
@@ -128,27 +129,21 @@ impl RuntimeSwitch<'_> {
         (!left.is_zero()).then_some(left)
     }
 
-    /// The echo through the running core to the slot its selector points at: under the proxy
-    /// capture through its mixed inbound (the way the user's programs go), under the TUN through
-    /// the core's probe inbound (`live-check-in`, always to the selector). Lab L11-3: through the
-    /// TUN the echo first looked its service's name up on the core's DoH connection, which the
-    /// select had just cut, and the service's own requests follow the user's rules there.
+    /// The echo through the running core to the slot its selector points at, in both captures
+    /// through the core's probe inbound (`live-check-in`: authenticated, routed to the selector
+    /// ahead of every rule of the user's). Never the capture's own way in: speed3-b1, the proxy
+    /// capture's mixed inbound follows the user's «Не через прокси» and direct domain rules, so
+    /// an echo service they name answered with the PC's own address for a dead server; lab
+    /// L11-3, through the TUN the echo looked its service's name up on the core's DoH
+    /// connection, which the select had just cut.
     async fn echo(
         &self,
         limit: Duration,
         settle: Option<Duration>,
         token: &CancellationToken,
     ) -> AppResult<IpAddr> {
-        let engines = self.engines;
-        match (self.proof.port, self.check) {
-            (Some(port), _) => engines.egress_core(port, None, limit, settle, token).await,
-            (None, Some(check)) => {
-                let creds = check.creds.as_ref();
-                (engines.egress_core(check.port, creds, limit, settle, token)).await
-            }
-            // No probe inbound (never in a slot run): through the capture itself.
-            (None, None) => engines.egress(None, limit, token).await,
-        }
+        let (port, creds) = (self.check.port, self.check.creds.as_ref());
+        (self.engines.egress_core(port, creds, limit, settle, token)).await
     }
 
     /// Data came back through the candidate `slot` after the select, within `within`: its own
@@ -212,20 +207,15 @@ impl RuntimeSwitch<'_> {
 
     /// speed3 S3-07, the one proof of a fresh candidate selected without a probe: the selector
     /// read `slot` back at the select; data must now come back through it within
-    /// `confirm_candidate` (a balanced slot not settled yet: until one request after its settle
-    /// point), with no hedge: its own downloads (the user's traffic) count first, else the one
-    /// echo through the core. Any exit counts: no probe named one, and servers of one provider
-    /// share exits.
+    /// `confirm_candidate` (2 s, never longer: a balancer that has not judged its members was
+    /// probed first instead, speed3-b2), with no hedge: its own downloads (the user's traffic)
+    /// count first, else the one echo through the core's probe inbound. Any exit counts: no probe
+    /// named one, servers of one provider share exits, and the echo went through the selector.
     async fn confirm_fresh(&mut self, slot: EngineSlot) -> AppResult<()> {
         let budget = self.timings.confirm_candidate;
-        let settle = self.settle_left();
         // The echo's own hedge would start after twice the budget: never reached.
         let limit = budget.saturating_mul(2);
-        let within = match settle {
-            Some(_) => core_budget(limit, settle).1.total,
-            None => budget,
-        };
-        match self.data_back(slot, limit, settle, within).await {
+        match self.data_back(slot, limit, None, budget).await {
             Ok(ip) => {
                 self.slots.egress[slot.index()] = ip;
                 Ok(())
@@ -413,6 +403,13 @@ impl SwitchOps for RuntimeSwitch<'_> {
             self.by_traffic = true;
             return Ok(());
         }
+        if self.fresh && self.settle_left().is_some() {
+            // speed3-b2 (S3-07 Sec: a candidate frozen since its check holds the user's traffic
+            // for 2 s at most): an unjudged balancer is proven only after its settle point, so
+            // its probe runs through the slot itself, before any select.
+            tracing::info!("switch: the fresh candidate's balancer has not settled: probe first");
+            self.fresh = false;
+        }
         if self.fresh {
             tracing::info!("switch: fresh evidence: select first, one proof after");
             return Ok(());
@@ -558,7 +555,9 @@ impl Actor {
         else {
             return false;
         };
-        let Some(slots) = &s.slots else {
+        // Every proof after the select goes through the core's probe inbound (every direct-VPN
+        // run has one).
+        let (Some(slots), Some(_)) = (&s.slots, &s.listeners.probe) else {
             return false;
         };
         let run = super::start::choose(profile, next.engine).map(|r| r.kind);
@@ -622,6 +621,7 @@ impl Actor {
             return None;
         };
         let slots = s.slots.as_mut()?;
+        let check = s.listeners.probe.as_ref()?;
         let previous = slots.active;
         let mut exit = s.core.exit_watch();
         let mut ops = RuntimeSwitch {
@@ -642,7 +642,7 @@ impl Actor {
             by_traffic: false,
             fresh,
             hints: facts.hints,
-            check: s.listeners.probe.as_ref(),
+            check,
             staged_at: None,
             recalled: Vec::new(),
         };

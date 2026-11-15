@@ -431,11 +431,15 @@ fn balanced_req() -> StartRequest {
 
 /// The harness's engines behind a balancer whose first pick is silent (lab L11-3): an echo
 /// through the core answers only with a request at the balancer's settle point (`egress_ms`
-/// after it); any echo without one hears nothing for its whole budget. Records every echo
-/// through the core as `(port, with credentials, settle)`.
+/// after it); any echo without one hears nothing for its whole budget. Slot A's plain server
+/// answers as in the plain harness while the selector points at it. Records every echo through
+/// the core as `(port, with credentials, settle)`.
 struct Balancer {
     fake: FakeEngines,
     echoes: Mutex<Vec<(u16, bool, Option<Duration>)>>,
+    /// Every member froze since the check: nothing comes back through the candidate's graph,
+    /// not even after the settle point.
+    frozen: AtomicBool,
 }
 
 impl Balancer {
@@ -522,10 +526,13 @@ impl Engines for Balancer {
         cancel: &CancellationToken,
     ) -> AppResult<IpAddr> {
         self.echoes.lock().push((port, creds.is_some(), settle));
-        let Some(at) = settle else {
+        let w = &self.fake.0;
+        if *w.tunnel_ip.lock() == w.slot_ip[0] {
+            return self.fake.egress(Some(port), limit, cancel).await;
+        }
+        let Some(at) = settle.filter(|_| !self.frozen.load(Ordering::SeqCst)) else {
             return Self::silent(limit, cancel).await;
         };
-        let w = &self.fake.0;
         tokio::select! {
             () = cancel.cancelled() => return Err(AppError::cancelled()),
             () = tokio::time::sleep(at) => {}
@@ -563,6 +570,7 @@ async fn balanced_switching(fresh: bool) -> (Arc<World>, Arc<Balancer>, TunnelHa
     let engines = Arc::new(Balancer {
         fake: FakeEngines(w.clone()),
         echoes: Mutex::default(),
+        frozen: AtomicBool::new(false),
     });
     let mut d = deps(&w);
     d.engines = engines.clone();
@@ -614,37 +622,61 @@ async fn a_balanced_candidate_settles_before_its_confirm_probe_first() {
     assert_eq!(w.count("egress"), 0, "{:?}", w.log());
 }
 
-/// Lab L11-3, select first (S3-07, a server with fresh evidence): the one proof after the
-/// select outlasts the 2 s budget for an unjudged balancer and commits on the answer after its
-/// settle point instead of rolling back on the silent first pick.
+/// speed3-b2 (S3-07 Sec: a candidate frozen since its check holds the user's traffic for 2 s at
+/// most): a fresh candidate whose balancer has not judged its members does not select first. It
+/// is probed through its own slot (select at 400, not 100) and confirmed at its settle point,
+/// as probe-first does.
 #[tokio::test(start_paused = true)]
-async fn a_balanced_candidate_settles_before_its_confirm_select_first() {
+async fn a_fresh_balanced_candidate_is_probed_before_its_select() {
     let (w, engines, h) = balanced_switching(true).await;
     let began = w.now_ms();
     let (receipt, took) = switch_to_balanced(&w, &h).await;
     assert!(receipt.committed && receipt.verified(), "{receipt:?}");
-    assert!(near(w.ms("select:b") - began, 100), "{:?}", w.log());
+    assert!(near(w.ms("select:b") - began, 400), "{:?}", w.log());
     assert!(near(took, 100 + 5_500 + 300), "{took}");
     let echoes = engines.echoes.lock().clone();
-    let settle = Some(Duration::from_millis(5_500));
+    let settle = Some(Duration::from_millis(5_200));
     assert_eq!(echoes, [(probe_in(&w), true, settle)]);
-    assert_eq!(all(&w, "egress-via").len(), 1, "the start's proof only");
+    assert_eq!(
+        all(&w, "egress-via").len(),
+        2,
+        "the start's proof and B's probe"
+    );
+}
+
+/// speed3-b2: a fresh balanced candidate frozen since its check never takes the user's
+/// traffic: its probe through its own slot gets nothing back before any select, and slot A
+/// keeps carrying everything (select first, it held the traffic for its settle + 8 s).
+#[tokio::test(start_paused = true)]
+async fn a_frozen_fresh_balanced_candidate_never_takes_the_traffic() {
+    let (w, engines, h) = balanced_switching(true).await;
+    engines.frozen.store(true, Ordering::SeqCst);
+    w.proofs_silent.store(1, Ordering::SeqCst);
+    let (receipt, _) = switch_to_balanced(&w, &h).await;
+    assert!(
+        !receipt.committed && receipt.previous_preserved,
+        "{receipt:?}"
+    );
+    assert!(all(&w, "select:b").is_empty(), "{:?}", w.log());
 }
 
 /// Lab L11-3: the candidate's own downloads prove it as soon as they show (1 s after the select
-/// here), long before its balancer settles; the switch never waits for the echo.
+/// here), long before its balancer settles; the switch never waits for the echo. With fresh
+/// evidence too, the unjudged balancer is probed first (speed3-b2): the select comes at 400.
 #[tokio::test(start_paused = true)]
 async fn a_candidates_own_traffic_proves_it_before_its_echo() {
     for fresh in [false, true] {
         let (w, _, h) = balanced_switching(fresh).await;
-        let select = if fresh { 100 } else { 400 };
+        let select = 400;
         let traffic = w.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(select + 1_000)).await;
             traffic.slot_traffic.lock()[1] = 4096;
         });
+        let began = w.now_ms();
         let (receipt, took) = switch_to_balanced(&w, &h).await;
         assert!(receipt.committed && receipt.verified(), "{receipt:?}");
+        assert!(near(w.ms("select:b") - began, select), "{fresh}");
         // The downloads are read every 50 ms.
         assert!(
             (select + 1_000..=select + 1_055).contains(&took),
@@ -761,4 +793,116 @@ async fn a_failed_switch_forgets_its_recalled_name() {
     );
     assert!(paths.is_empty(), "{paths:?}");
     assert!(!vpnte_core::resolve::remembers(host));
+}
+
+/// The PC's own address: what an echo through the user's direct path answers.
+const HOME: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 77));
+
+/// The user's inputs with «Не через прокси» naming the echo service (so a DDNS updater sees the
+/// home address, say).
+struct Bypass(FakeInputs);
+
+#[async_trait]
+impl InputsSource for Bypass {
+    async fn snapshot(&self) -> AppResult<UserInputs> {
+        let inputs = self.0.snapshot().await?;
+        let proxy_bypass = vec!["ipify.org".to_owned()];
+        Ok(UserInputs {
+            proxy_bypass,
+            ..inputs
+        })
+    }
+}
+
+fn proxy_req(key: &str) -> StartRequest {
+    StartRequest {
+        capture: CaptureKind::Proxy,
+        ..vpn_req(key, EnginePref::Xray)
+    }
+}
+
+/// A Proxy session on `XRAY_KEY` with [`Bypass`] (the harness answers an echo through the mixed
+/// inbound with [`HOME`]), its switch steps timed as in [`switching`].
+async fn bypassed_switching(fresh: bool) -> (Arc<World>, TunnelHandle) {
+    let w = World::new();
+    *w.echo_direct.lock() = Some(HOME);
+    let mut d = budget_deps(&w);
+    d.inputs = Arc::new(Bypass(FakeInputs(w.clone())));
+    d.failover = Some(Arc::new(Evidence(fresh)));
+    let h = TunnelHandle::spawn(d);
+    h.start(proxy_req(XRAY_KEY), CancellationToken::new())
+        .await
+        .unwrap();
+    w.slot_ready_ms.store(100, Ordering::SeqCst);
+    w.proof_ms.store(300, Ordering::SeqCst);
+    w.egress_ms.store(300, Ordering::SeqCst);
+    (w, h)
+}
+
+/// The user's switch of a [`bypassed_switching`] session to `XRAY_KEY_2`.
+async fn bypassed_switch(h: &TunnelHandle) -> SwitchReceipt {
+    let owner: OwnerCheck = Arc::new(|| true);
+    let next = proxy_req(XRAY_KEY_2);
+    let receipt = h.switch_upstream(next, CancellationToken::new(), owner);
+    receipt.await.expect("switched in place")
+}
+
+/// speed3-b1 (Proxy mode; the user's «Не через прокси» names the echo service, so an echo
+/// through the mixed inbound leaves direct with the PC's own address): every proof after the
+/// select goes through the core's probe inbound, which the config sends to the selector ahead
+/// of that rule. A live candidate commits with its own exit, select first and probe first
+/// alike; the PC's address is never its exit.
+#[tokio::test(start_paused = true)]
+async fn a_proxy_switch_is_proven_through_the_slot_not_the_users_direct_rule() {
+    for fresh in [true, false] {
+        let (w, h) = bypassed_switching(fresh).await;
+        let config = w.configs.lock()[0].clone();
+        let rules = config["route"]["rules"].as_array().cloned();
+        let rules = rules.unwrap_or_default();
+        let probe = (rules.iter())
+            .position(|r| r["inbound"] == "live-check-in" && r["outbound"] == "proxy-out");
+        let bypass = rules
+            .iter()
+            .position(|r| r.to_string().contains("ipify.org"));
+        assert!(probe.zip(bypass).is_some_and(|(p, b)| p < b), "{rules:?}");
+        let receipt = bypassed_switch(&h).await;
+        assert!(
+            receipt.committed && receipt.verified(),
+            "{fresh}: {receipt:?}"
+        );
+        assert_eq!(
+            h.status().borrow().proven_exit,
+            Some(w.slot_ip[1]),
+            "{fresh}"
+        );
+        let through_core = format!("egress:{}", probe_in(&w));
+        assert_eq!(w.count(&through_core), 1, "{fresh}: {:?}", w.log());
+        let mixed = format!("egress:{FAKE_MIXED_PORT}");
+        assert_eq!(w.count(&mixed), 0, "{fresh}: {:?}", w.log());
+    }
+}
+
+/// speed3-b1: a dead fresh candidate is never committed on the PC's own address. Its echo
+/// through the probe inbound hears nothing for its 2 s; slot A is selected again, re-proven the
+/// same way, and keeps its published exit.
+#[tokio::test(start_paused = true)]
+async fn a_dead_fresh_candidate_is_not_proven_by_the_users_direct_rule() {
+    let (w, h) = bypassed_switching(true).await;
+    w.egress_silent.store(true, Ordering::SeqCst);
+    let healed = w.clone();
+    tokio::spawn(async move {
+        // B's 2 s run out at 2.1 s; slot A answers again for its re-proof.
+        tokio::time::sleep(Duration::from_millis(2_050)).await;
+        healed.egress_silent.store(false, Ordering::SeqCst);
+    });
+    let receipt = bypassed_switch(&h).await;
+    assert!(
+        !receipt.committed && receipt.previous_preserved,
+        "{receipt:?}"
+    );
+    assert_eq!(h.status().borrow().proven_exit, Some(w.slot_ip[0]));
+    let through_core = format!("egress:{}", probe_in(&w));
+    assert_eq!(w.count(&through_core), 2, "{:?}", w.log());
+    let mixed = format!("egress:{FAKE_MIXED_PORT}");
+    assert_eq!(w.count(&mixed), 0, "{:?}", w.log());
 }

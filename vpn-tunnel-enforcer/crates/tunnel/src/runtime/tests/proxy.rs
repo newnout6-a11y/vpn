@@ -274,10 +274,11 @@ async fn bundled_engines_go_direct_only_under_the_tun() {
 
 /// NOADMIN.md §2 (review): under the proxy capture the app's own requests never use the system
 /// proxy, so the default route shows the real address. The in-place switch therefore reads the
-/// tunnel egress through the session's mixed inbound; through the default route it could never
-/// match the slot's address and every Soft server switch on Xray would fail.
+/// tunnel egress through the core's probe inbound (speed3-b1: not the session's mixed inbound,
+/// whose flows follow the user's «Не через прокси» and direct rules); through the default route
+/// it could never match the slot's address and every Soft server switch on Xray would fail.
 #[tokio::test]
-async fn proxy_switch_reads_the_egress_through_the_mixed_inbound() {
+async fn proxy_switch_reads_the_egress_through_the_core_probe_inbound() {
     use vpnte_base::types::EnginePref;
     let w = World::new();
     let h = TunnelHandle::spawn(deps(&w));
@@ -289,13 +290,20 @@ async fn proxy_switch_reads_the_egress_through_the_mixed_inbound() {
         .await
         .expect("proxy slot start");
     let port = proxy_in(&config(&w, 0)).expect("port");
+    let inbounds = config(&w, 0)["inbounds"].as_array().cloned();
+    let probe = (inbounds.unwrap_or_default().iter())
+        .find(|i| i["tag"] == "live-check-in")
+        .and_then(|i| i["listen_port"].as_u64())
+        .expect("a probe inbound");
     let owner: crate::api::OwnerCheck = Arc::new(|| true);
     let sw = h
         .switch_upstream(soft(XRAY_KEY_2), CancellationToken::new(), owner)
         .await
         .expect("in place");
     assert!(sw.verified(), "{sw:?}");
-    assert!(w.count(&format!("egress:{port}")) >= 1, "{:?}", w.log());
+    assert!(w.count(&format!("egress:{probe}")) >= 1, "{:?}", w.log());
+    let mixed = w.count(&format!("egress:{port}"));
+    assert_eq!(mixed, 0, "never the mixed inbound: {:?}", w.log());
     assert_eq!(
         w.count("egress"),
         0,

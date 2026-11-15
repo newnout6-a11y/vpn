@@ -123,6 +123,10 @@ pub struct World {
     pub no_fault: AtomicBool,
     /// The tunnel's own echo gets no answer (a dead upstream).
     pub egress_silent: AtomicBool,
+    /// speed3-b1: the user's «Не через прокси» names the echo service, so an echo through
+    /// [`FakeProxy`]'s mixed inbound leaves direct and answers with this address (the PC's own)
+    /// at once, whatever the upstream.
+    pub echo_direct: Mutex<Option<IpAddr>>,
     /// The next this many exit proofs through a staged upstream get no answer.
     pub proofs_silent: AtomicU32,
     /// An exit proof takes this long (ms) and then notes `proof-done`.
@@ -198,6 +202,7 @@ impl World {
             auto_restart: AtomicBool::new(true),
             no_fault: AtomicBool::new(false),
             egress_silent: AtomicBool::new(false),
+            echo_direct: Mutex::new(None),
             proofs_silent: AtomicU32::new(0),
             proof_ms: AtomicU32::new(0),
             budget_spent: AtomicBool::new(false),
@@ -588,6 +593,10 @@ impl Engines for FakeEngines {
             Some(port) => format!("egress:{port}"),
             None => "egress".to_owned(),
         });
+        let direct = *self.0.echo_direct.lock();
+        if let (Some(home), Some(FAKE_MIXED_PORT)) = (direct, via) {
+            return Ok(home);
+        }
         self.0.take(&self.0.egress_ms).await;
         if self.0.egress_silent.load(Ordering::SeqCst) {
             return Err(echo_failed(EchoFailure::NoReply));
