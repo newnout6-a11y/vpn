@@ -568,6 +568,7 @@ fn moscow() -> TimeZone {
 fn line(time: Option<&str>, level: LineLevel, scope: Option<&str>, text: &str) -> JournalLine {
     JournalLine {
         key: 0,
+        slot: None,
         time: time.map(str::to_owned),
         level,
         scope: scope.map(str::to_owned),
@@ -718,6 +719,7 @@ fn journal_tail_levels_and_search() {
                 text: format!(
                     r#"{{"ts":"2026-11-11T08:00:00Z","level":"{level}","target":"vpnte_x","msg":"{i}"}}"#
                 ),
+                slot: None,
             }
         })
         .collect();
@@ -1046,6 +1048,51 @@ impl ErrorKindAll {
 
 /// VirtualDom runs: every tab over every demo scene, the remembered state, and a clear's
 /// request lifetime.
+/// p-owner-logs follow-up: the Xray source shows both slots after a switch; each line is
+/// tagged with its slot (also when copied), and the two files' equal offsets stay distinct
+/// row keys.
+#[test]
+fn both_xray_slots_are_tagged_and_keyed_apart() {
+    let tz = TimeZone::UTC;
+    let line = |slot, text: &str| TailLine {
+        offset: 0,
+        text: text.to_owned(),
+        slot: Some(slot),
+    };
+    let tail = LogTail {
+        lines: vec![
+            line(
+                XraySlot::A,
+                "2026/11/15 04:44:45.100000 [Warning] slot a line",
+            ),
+            line(
+                XraySlot::B,
+                "2026/11/15 04:45:10.200000 [Warning] slot b line",
+            ),
+        ],
+        exists: true,
+        ..LogTail::default()
+    };
+    let shown = journal(LogSource::Xray, &tail, LevelFilter::All, "", &tz);
+    let slots: Vec<_> = shown.iter().map(|l| l.slot).collect();
+    assert_eq!(
+        slots,
+        [Some(XraySlot::B), Some(XraySlot::A)],
+        "newest first"
+    );
+    assert_ne!(shown[0].key, shown[1].key);
+    assert!(
+        shown[0].copy_text().contains(" xray-b "),
+        "{}",
+        shown[0].copy_text()
+    );
+    assert_eq!(
+        journal(LogSource::Xray, &tail, LevelFilter::All, "xray-b", &tz).len(),
+        1,
+        "the search finds a slot"
+    );
+}
+
 mod dom {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;

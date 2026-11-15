@@ -236,6 +236,61 @@ async fn engine_logs_follow_the_session() {
     backend.shutdown.cancel();
 }
 
+/// p-owner-logs follow-up: after a server switch the running server's Xray lines are in slot
+/// B's log; the Xray source shows both slots by their lines' time, each tagged (a continuation
+/// line keeps the time before it). With lines of slot A only nothing is tagged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_xray_source_shows_both_slots() {
+    use ui::XraySlot::{A, B};
+    let dir = TempDir::new("logs-slots");
+    let backend = backend(&dir, FakeTunnel::new(false));
+    let api = start(&backend, ServiceAnswer::NotInstalled);
+    let logs = &backend.dirs.logs;
+    let a = concat!(
+        "2026/11/15 04:44:45.100000 [Warning] a started\n",
+        "2026/11/15 04:46:00.000000 [Warning] a stopped\n",
+    );
+    std::fs::write(logs.join("xray-a.log"), a).expect("log");
+    let alone = api.read_log(LogSource::Xray).await.expect("tail");
+    assert_eq!(alone.lines.len(), 2);
+    assert!(
+        alone.lines.iter().all(|l| l.slot.is_none()),
+        "one slot: untagged"
+    );
+    let b = "2026/11/15 04:45:10.200000 [Warning] b started\n  continued\n";
+    std::fs::write(logs.join("xray-b.log"), b).expect("log");
+    let both = api.read_log(LogSource::Xray).await.expect("tail");
+    let seen: Vec<_> = (both.lines.iter())
+        .map(|l| {
+            (
+                l.slot,
+                l.text.rsplit(' ').next().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    let want = [
+        (A, "started"),
+        (B, "started"),
+        (B, "continued"),
+        (A, "stopped"),
+    ];
+    let want: Vec<_> = want
+        .iter()
+        .map(|(s, t)| (Some(*s), (*t).to_owned()))
+        .collect();
+    assert_eq!(seen, want);
+    // Through the service's pipe the same merge (its lines here carry no time).
+    let fake = FakeService(std::sync::Mutex::new(None));
+    let a = fake.engine(EngineLog::XrayA).await.expect("answer");
+    let b = fake.engine(EngineLog::XrayB).await.expect("answer");
+    let note = TailNote::ServiceSession;
+    let merged = sources::slots_tail(sources::engine_tail(a, note), sources::engine_tail(b, note));
+    let slots: Vec<_> = merged.lines.iter().map(|l| l.slot).collect();
+    assert_eq!(slots, [Some(A), Some(B)]);
+    assert_eq!(merged.note, note);
+    backend.shutdown.cancel();
+}
+
 /// p-logs: the service source shows what the pipe gave for this user (its lines, or why there
 /// are none); nothing is read from the service's private folder.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

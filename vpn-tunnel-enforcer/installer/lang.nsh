@@ -27,6 +27,9 @@ LangString WebView2Installing ${LANG_ENGLISH} "Installing Microsoft Edge WebView
 LangString WebView2Installing ${LANG_RUSSIAN} "Устанавливается Microsoft Edge WebView2 для окна приложения…"
 LangString WebView2Later ${LANG_ENGLISH} "Microsoft Edge WebView2 could not be installed now, and the app window needs it. Connect to the internet and start VPN Tunnel Enforcer: it offers to install it."
 LangString WebView2Later ${LANG_RUSSIAN} "Microsoft Edge WebView2 сейчас установить не удалось, а без него окно приложения не откроется. Подключитесь к интернету и запустите VPN Tunnel Enforcer: оно предложит установить его."
+; Lab live-12 L12-8: the bootstrapper ran fine (twice) and the runtime is still not registered.
+LangString WebView2NotReady ${LANG_ENGLISH} "Microsoft Edge WebView2 is not ready yet, and the app window needs it. Start VPN Tunnel Enforcer: it offers to install it."
+LangString WebView2NotReady ${LANG_RUSSIAN} "Microsoft Edge WebView2 ещё не готов, а без него окно приложения не откроется. Запустите VPN Tunnel Enforcer: оно предложит установить его."
 
 LangString NeedsX64 ${LANG_ENGLISH} "VPN Tunnel Enforcer requires 64-bit Windows."
 LangString NeedsX64 ${LANG_RUSSIAN} "Для VPN Tunnel Enforcer нужна 64-разрядная Windows."

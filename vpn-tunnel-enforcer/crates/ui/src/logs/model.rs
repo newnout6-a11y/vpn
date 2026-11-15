@@ -442,6 +442,26 @@ impl LogSource {
 pub struct TailLine {
     pub offset: u64,
     pub text: String,
+    /// The Xray slot whose log holds it, when the tail merges both (`None`: one file).
+    pub slot: Option<XraySlot>,
+}
+
+/// One of Xray's two slots: a server switch starts the other one, so after a switch the
+/// running server's lines are in the other slot's log (p-owner-logs follow-up).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XraySlot {
+    A,
+    B,
+}
+
+impl XraySlot {
+    /// The slot's letter, as its log file names it (`xray-a.log`).
+    pub fn letter(self) -> &'static str {
+        match self {
+            XraySlot::A => "A",
+            XraySlot::B => "B",
+        }
+    }
 }
 
 /// What the calm line over the lines says about where they come from.

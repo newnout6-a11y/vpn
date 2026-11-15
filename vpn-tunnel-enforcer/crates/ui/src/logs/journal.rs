@@ -7,12 +7,14 @@ use jiff::tz::TimeZone;
 use serde_json::Value;
 
 use super::format::local_time;
-use super::model::{LogSource, LogTail};
+use super::model::{LogSource, LogTail, XraySlot};
 
 /// Lines rendered at most (the newest that match).
 pub const TAIL_LINES: usize = 2000;
 /// Longer lines are cut (a stray binary or a giant JSON field must not flood the pane).
 pub const MAX_LINE_CHARS: usize = 1000;
+/// Marks slot B's row keys (a byte offset never reaches it).
+pub const SLOT_B_KEY: u64 = 1 << 63;
 
 /// Severity of a journal line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -75,8 +77,11 @@ impl LevelFilter {
 /// One line as shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalLine {
-    /// The line's byte offset in its file (row key; 0 from [`parse_line`]).
+    /// The line's byte offset in its file (row key; 0 from [`parse_line`]); slot B's lines
+    /// carry [`SLOT_B_KEY`] too, so both Xray logs' offsets stay distinct keys.
     pub key: u64,
+    /// The Xray slot whose log holds it, when both are shown.
+    pub slot: Option<XraySlot>,
     /// Local `HH:MM:SS`, when the line carries a time.
     pub time: Option<String>,
     pub level: LineLevel,
@@ -96,6 +101,9 @@ impl JournalLine {
             out.push(' ');
         }
         out.push_str(self.level.name());
+        if let Some(slot) = self.slot {
+            out.push_str(&format!(" xray-{}", slot.letter().to_ascii_lowercase()));
+        }
         if let Some(scope) = &self.scope {
             out.push_str(&format!(" [{scope}]"));
         }
@@ -128,7 +136,11 @@ pub fn journal(
         .rev()
         .filter_map(|line| {
             let mut parsed = parse_line(source, &line.text, tz)?;
-            parsed.key = line.offset;
+            parsed.key = match line.slot {
+                Some(XraySlot::B) => line.offset | SLOT_B_KEY,
+                _ => line.offset,
+            };
+            parsed.slot = line.slot;
             Some(parsed)
         })
         .filter(|line| level.keeps(line.level) && line.contains(&needle))
@@ -154,6 +166,7 @@ pub fn parse_line(source: LogSource, line: &str, tz: &TimeZone) -> Option<Journa
 fn plain(line: &str) -> JournalLine {
     JournalLine {
         key: 0,
+        slot: None,
         time: None,
         level: LineLevel::Info,
         scope: None,
@@ -213,6 +226,7 @@ fn parse_app(line: &str, tz: &TimeZone) -> Option<JournalLine> {
     }
     Some(JournalLine {
         key: 0,
+        slot: None,
         time,
         level,
         scope: target.map(short_scope),
@@ -245,6 +259,7 @@ fn parse_singbox(line: &str) -> Option<JournalLine> {
     let (scope, text) = split_scope(rest);
     Some(JournalLine {
         key: 0,
+        slot: None,
         time,
         level,
         scope,
@@ -297,6 +312,7 @@ fn parse_xray(line: &str) -> Option<JournalLine> {
     let (scope, text) = split_scope(rest);
     Some(JournalLine {
         key: 0,
+        slot: None,
         time: Some(time),
         level,
         scope,

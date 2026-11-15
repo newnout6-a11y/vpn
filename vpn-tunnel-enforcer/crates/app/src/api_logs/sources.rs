@@ -9,7 +9,7 @@ use vpnte_service::pipe::client::{CallError, Client, ServerCheck};
 use vpnte_service::proto::{EngineLog, ErrorCode, Reply, Request, ServiceLogWire};
 use vpnte_tunnel::api::CaptureKind;
 use vpnte_tunnel::history::{Entry, Route};
-use vpnte_ui::logs::{LogTail, TailLine, TailNote};
+use vpnte_ui::logs::{LogTail, TailLine, TailNote, XraySlot};
 
 use crate::boot::service::Presence;
 
@@ -42,12 +42,75 @@ pub fn read_tail(dir: &Path, stem: &str, note: TailNote) -> AppResult<LogTail> {
             .map(|l| TailLine {
                 offset: l.offset,
                 text: l.text,
+                slot: None,
             })
             .collect(),
         exists: tail.exists,
         truncated: tail.truncated,
         note,
     })
+}
+
+/// Xray's two slots as one tail (p-owner-logs follow-up): a server switch starts the other
+/// slot, whose log starts anew, so after a switch the running server's lines are in it. Both
+/// current logs are merged by their lines' time, each line tagged with its slot; without lines
+/// of slot B the tail is slot A's as before (untagged).
+pub fn slots_tail(a: LogTail, b: LogTail) -> LogTail {
+    if b.lines.is_empty() {
+        return a;
+    }
+    let stamped = |lines: Vec<TailLine>, slot| {
+        let mut last: Option<String> = None;
+        let mut out = Vec::with_capacity(lines.len());
+        for mut line in lines {
+            // A line without its own time (a continuation) keeps the one before it.
+            if let Some(at) = stamp(&line.text) {
+                last = Some(at.to_owned());
+            }
+            line.slot = Some(slot);
+            out.push((last.clone(), line));
+        }
+        out.into_iter().peekable()
+    };
+    let (mut a_lines, mut b_lines) = (stamped(a.lines, XraySlot::A), stamped(b.lines, XraySlot::B));
+    let mut lines = Vec::with_capacity(a_lines.len() + b_lines.len());
+    loop {
+        let take_a = match (a_lines.peek(), b_lines.peek()) {
+            (Some((at_a, _)), Some((at_b, _))) => at_a <= at_b,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        let next = if take_a {
+            a_lines.next()
+        } else {
+            b_lines.next()
+        };
+        lines.extend(next.map(|(_, line)| line));
+    }
+    LogTail {
+        lines,
+        exists: a.exists || b.exists,
+        truncated: a.truncated || b.truncated,
+        note: a.note,
+    }
+}
+
+/// The time an Xray line starts with (`2026/11/15 04:44:45.123456`), comparable as text.
+fn stamp(text: &str) -> Option<&str> {
+    let b = text.as_bytes();
+    let shape = b.len() > 19
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'/'
+        && b[7] == b'/'
+        && b[10] == b' '
+        && b[13] == b':'
+        && b[16] == b':';
+    if !shape {
+        return None;
+    }
+    let end = text[11..].find(' ').map_or(text.len(), |i| i + 11);
+    Some(&text[..end])
 }
 
 /// Which folder holds the engine log of a session with `capture` and what the calm line says:
@@ -200,6 +263,7 @@ fn lines_tail(log: ServiceLogWire) -> LogTail {
             .map(|l| TailLine {
                 offset: l.offset,
                 text: l.text,
+                slot: None,
             })
             .collect(),
         exists: true,

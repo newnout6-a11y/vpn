@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::timeout;
-use vpnte_base::types::{Level, Notice, Verdict};
+use vpnte_base::types::{Level, Notice};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::ops::{FeatureKind, RunOpts, Source};
 use vpnte_probes::leak::{CheckReport, CheckStatus};
@@ -17,7 +17,7 @@ use vpnte_tunnel::lifecycle::{ConnError, DEFAULT_TIMEOUT, Done};
 use vpnte_ui::panels::Selected;
 use vpnte_ui::tray::QuitMode;
 
-use super::{Hub, project};
+use super::{Hub, LeakFact, project};
 use crate::services::TunnelOps;
 use crate::support::{blocking, detached};
 
@@ -249,9 +249,7 @@ impl Hub {
             {
                 let mut local = hub.local.lock();
                 if local.epoch == epoch {
-                    local.leak = res
-                        .as_ref()
-                        .map_or(Verdict::NotChecked, project::leak_verdict);
+                    local.leak = res.as_ref().map_or_else(|_| LeakFact::default(), LeakFact::of);
                 }
             }
             hub.publish_dashboard();
@@ -273,10 +271,11 @@ impl Hub {
     /// «Проверить маршрут» from the tray: the leak check, its verdict as a notice.
     pub(super) async fn check_route(self: &Arc<Self>) -> AppResult<()> {
         let report = self.leak_check(Source::Tray).await?;
+        let (status, headline) = self.shown_check(&report);
         let notice = Notice {
-            level: project::check_level(report.summary),
+            level: project::check_level(status),
             title: Msg::new("app.dashboard.routeCheck"),
-            body: Some(report.headline),
+            body: Some(headline),
         };
         // Asked for by the user: no category, so no notification switch hides the answer.
         self.backend.notifier.notify(notice, None);
@@ -285,6 +284,16 @@ impl Hub {
 }
 
 impl Hub {
+    /// A finished check as the start page's leak fact reads it (lab L12-4): the mascot and the
+    /// tray's notice say what the page says.
+    pub(super) fn shown_check(&self, report: &CheckReport) -> (CheckStatus, Msg) {
+        let explained = {
+            let view = self.dash.borrow();
+            project::ipv4_explained(&view.conn, view.same_exit)
+        };
+        project::shown_check(report, explained)
+    }
+
     /// Reads the kill switch back (shown as «Проверяем» meanwhile); of overlapping reads only
     /// the latest one lands.
     pub(super) async fn read_firewall(&self) {

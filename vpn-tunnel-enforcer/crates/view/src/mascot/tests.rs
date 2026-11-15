@@ -82,6 +82,7 @@ fn rng_where(pred: impl Fn(f64) -> bool) -> fastrand::Rng {
 #[test]
 fn announces_the_build_then_celebrates() {
     let mut rig = Rig::mount(MascotPhase::Off);
+    rig.send(MascotEvent::Mode(Some(crate::swiss::Mode::Tun)));
     rig.send(MascotEvent::Phase(MascotPhase::Connecting));
     assert_eq!(rig.key(), "mascot.building");
     assert_eq!(rig.mood(), Mood::Scan);
@@ -792,6 +793,43 @@ fn every_line_exists_in_ru_and_en() {
             assert!(!cat.contains_key(&unused), "unused {unused}");
         }
     }
+}
+
+/// Lab L12-7: the connecting line follows the mode like the connected ones: «Строю туннель…»
+/// only for a Tunnel connect, a Proxy connect has its own words, an unknown mode the plain one
+/// (and none of those says «туннель»); a switch keeps its own line.
+#[test]
+fn the_connecting_line_follows_the_mode() {
+    use crate::swiss::Mode;
+    let catalogs = crate::test_locales::catalogs();
+    let says = |key: &str| {
+        let texts: Vec<String> = catalogs
+            .iter()
+            .filter_map(|c| c.get(key).cloned())
+            .collect();
+        assert_eq!(texts.len(), catalogs.len(), "{key} in every catalog");
+        texts.join(" ").to_lowercase()
+    };
+    let connecting = |mode: Option<Mode>, from: MascotPhase| {
+        let mut rig = Rig::mount(from);
+        rig.send(MascotEvent::Mode(mode));
+        rig.send(MascotEvent::Phase(MascotPhase::Connecting));
+        rig.key()
+    };
+    assert_eq!(
+        connecting(Some(Mode::Tun), MascotPhase::Off),
+        "mascot.building"
+    );
+    for (mode, key) in [
+        (Some(Mode::Soft), "view.mascot.buildingProxy"),
+        (None, "view.mascot.buildingPlain"),
+    ] {
+        assert_eq!(connecting(mode, MascotPhase::Off), key, "{mode:?}");
+        assert!(!says(key).contains("туннел") && !says(key).contains("tunnel"));
+    }
+    assert!(says("view.mascot.buildingProxy").contains("прокси"));
+    let switch = connecting(Some(Mode::Soft), MascotPhase::On);
+    assert_eq!(switch, "mascot.switching");
 }
 
 /// p-follow3: in Proxy mode, and while the mode is unknown, neither the connected line nor a

@@ -3,6 +3,7 @@
 use std::net::IpAddr;
 use std::time::Instant;
 
+use vpnte_base::Msg;
 use vpnte_base::i18n::Lang;
 use vpnte_base::types::{KillSwitchLevel, ProxyKind, UnixMs, Verdict};
 use vpnte_core::net::{HostPort, Route};
@@ -244,13 +245,48 @@ pub(super) fn same_exit(
     }
 }
 
-/// `exit` as the page shows it when [`same_exit`] explains it: not checked, never a leak.
+/// `exit` as the page shows it when [`same_exit`] explains it: not checked, never a leak. Not
+/// `Warn` either: its sub-line says the exit changed (lab L12-4), which is not what happened.
 pub(super) fn calm_exit(exit: ExitIp) -> ExitIp {
     ExitIp {
         leak: false,
-        verdict: Verdict::Warn,
+        verdict: Verdict::NotChecked,
         ..exit
     }
+}
+
+/// What the same-exit verdict was made of, for the log (lab L12-4): never an address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ExitFacts {
+    pub verdict: SameExit,
+    /// The latest read equals the address measured without our VPN.
+    pub read_is_home: bool,
+    /// The run's exit proof against that address: `home`, `elsewhere` or `none`.
+    pub proven: &'static str,
+    pub other_vpn: bool,
+}
+
+/// [`same_exit`]'s inputs and outcome on a settled session with a home address (`None`
+/// otherwise: nothing was judged).
+pub(super) fn exit_facts(
+    snap: &TunnelSnapshot,
+    status: &TunStatus,
+    ev: &IpEvidence,
+    other_vpn: bool,
+) -> Option<ExitFacts> {
+    let settled_on = snap.state == fsm::TunnelState::Connected && snap.transition.is_none();
+    let home = ev.real_ip.filter(|_| settled_on && status.running)?;
+    let proven = match status.proven_exit {
+        Some(ip) if ip == home => "home",
+        Some(_) => "elsewhere",
+        None => "none",
+    };
+    Some(ExitFacts {
+        verdict: same_exit(snap, status, ev, other_vpn),
+        read_is_home: ev.last.map(|s| s.ip) == Some(home),
+        proven,
+        other_vpn,
+    })
 }
 
 /// The exit address worth a country lookup: a passed check of the adopted exit of our running,
@@ -321,6 +357,43 @@ pub(super) fn kill_switch_engaged(ks: &KillSwitchStatus) -> bool {
 /// The leak fact's verdict of a finished check (`Info`-only cards have none).
 pub(super) fn leak_verdict(report: &CheckReport) -> Verdict {
     report.summary.verdict().unwrap_or(Verdict::NotChecked)
+}
+
+/// The check's verdict while the start page explains the exit as the address without our VPN
+/// ([`same_exit`], lab L12-4): its public IPv4 equal to that address (the item fails only so)
+/// proves nothing either and counts as a warning; every other item keeps its rank, so a real
+/// leak elsewhere (IPv6, DNS, the self-test) still reads «Найдены».
+pub(super) fn explained_leak_status(report: &CheckReport) -> CheckStatus {
+    let items: Vec<_> = (report.items.iter().cloned())
+        .map(|mut item| {
+            if item.id == "ipv4" && item.status == CheckStatus::Fail {
+                item.status = CheckStatus::Warn;
+            }
+            item
+        })
+        .collect();
+    vpnte_probes::leak::summarize(&items)
+}
+
+/// The start page's same-exit verdict covers the leak check's public IPv4 (lab L12-4): outside
+/// Proxy mode, whose leak fact judges the programs outside the proxy («Вне прокси»).
+pub(super) fn ipv4_explained(conn: &ConnView, same_exit: SameExit) -> bool {
+    conn.mode != Some(swiss::Mode::Soft) && same_exit != SameExit::No
+}
+
+/// A finished check as the start page reads it: the status and its headline. The explanation
+/// only ever turns a failure into a warning.
+pub(super) fn shown_check(report: &CheckReport, explained: bool) -> (CheckStatus, Msg) {
+    let status = if explained {
+        explained_leak_status(report)
+    } else {
+        report.summary
+    };
+    if status == report.summary {
+        (status, report.headline.clone())
+    } else {
+        (status, Msg::new("probes.leak.check.summary.warn"))
+    }
 }
 
 /// A severity for the tray's check result notice.

@@ -170,6 +170,7 @@
       "follow": "Follow",
       "copyVisible": "Copy visible",
       "copyLine": "Copy line",
+      "slot": "slot {{slot}}",
       "noMatches": "No lines match",
       "noService": "The helper service is not installed",
       "oldService": "The helper service is older than the app and does not send its log yet. It will after the service updates.",

@@ -98,7 +98,7 @@ every other one (all of a failed call's, all of a connect's or switch's) into a 
 | `set_protection_toggles(toggles)` | Settings `save` when `leak_protection` changed (read the others from `kill_switch().settings`) |
 | `release_kill_switch()` | Dashboard `release_kill_switch` |
 | `ip_evidence()` | Dashboard `ExitIp`, Tray `public_ip` / `leak` |
-| `leak_check(cancel)` | Dashboard `run_leak_check`, Tray `check_route` (as an `ops` operation, verdict as a notice) |
+| `leak_check(cancel)` | Dashboard `run_leak_check`, Tray `check_route` (as an `ops` operation, verdict as a notice; in Tunnel mode a public IPv4 the start page's same-exit line explains counts as a warning, L12-4) |
 | `traffic()` | Panels `traffic`, Tray speeds |
 | `ping(ids, cancel)` | Panels `ping_one` / `ping_all`, Servers `ping_one` / `ping_many` |
 | `probe_ctx(device)` | Servers `check_group_health` (`key_health::check_many`) and `check_all_health` (`key_health::check_list`), and anyone pinging by hand (`.net`) |

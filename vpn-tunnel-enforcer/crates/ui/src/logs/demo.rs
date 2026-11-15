@@ -178,7 +178,11 @@ fn tail_lines(lines: impl IntoIterator<Item = String>) -> Vec<TailLine> {
     lines
         .into_iter()
         .map(|text| {
-            let line = TailLine { offset, text };
+            let line = TailLine {
+                offset,
+                text,
+                slot: None,
+            };
             offset += line.text.len() as u64 + 1;
             line
         })

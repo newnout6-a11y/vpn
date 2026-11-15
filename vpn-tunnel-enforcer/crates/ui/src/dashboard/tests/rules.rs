@@ -360,3 +360,20 @@ fn an_explained_same_exit_is_a_calm_line() {
     assert_eq!(banners(&view(connected())).same_exit, SameExit::No);
     assert_eq!(SameExit::No.key(), None);
 }
+
+/// Lab L12-7: while a connect runs the session has no mode yet (the lifecycle sets it once
+/// connected), so the mascot hears the mode the connect runs in, the saved routing mode; the
+/// session's own mode wins once it is there, and nothing is claimed while off.
+#[test]
+fn the_mascot_hears_the_connects_mode() {
+    let mut v = view(connecting());
+    v.soft_mode = true;
+    assert_eq!(mascot_mode(&v), Some(Mode::Soft));
+    v.soft_mode = false;
+    assert_eq!(mascot_mode(&v), Some(Mode::Tun));
+    let mut on = view(connected());
+    on.soft_mode = true;
+    assert_eq!(mascot_mode(&on), Some(Mode::Tun), "the session's mode");
+    let off = view(ConnView::default());
+    assert_eq!(mascot_mode(&off), None);
+}

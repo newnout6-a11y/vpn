@@ -71,12 +71,12 @@ impl MascotBrain {
                     self.act(now, act.text("mascot.exposed").ms(2600));
                 }
                 MascotPhase::Connecting => {
-                    let key = if prev == MascotPhase::On {
-                        "mascot.switching"
+                    let line = if prev == MascotPhase::On {
+                        Msg::new("mascot.switching")
                     } else {
-                        "mascot.building"
+                        Family::Building.pick(self.mode, rng)
                     };
-                    self.say(now, Msg::new(key), Duration::from_millis(2600), false);
+                    self.say(now, line, Duration::from_millis(2600), false);
                 }
             }
         }

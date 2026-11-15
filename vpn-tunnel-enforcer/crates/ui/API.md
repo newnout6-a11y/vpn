@@ -748,11 +748,13 @@ pub fn shown_events(rows, &EventQuery, tr) -> (Vec<&EventRow> /*newest first, �
 pub enum Day { Today, Yesterday, On(Date) }   pub fn by_day(rows, now, tz) -> Vec<(Day, Vec<&EventRow>)>;
 pub fn line_text(&EventRow, tr) -> String;    pub fn facts(&SessionFacts, tr, bytes) -> Vec<String>;
 pub fn event_text(&EventRow, tz, tr, bytes) -> String;          // «Скопировать»
-pub struct LogTail { pub lines: Vec<TailLine { offset: u64, text: String }>, pub exists: bool, pub truncated: bool,
+pub struct LogTail { pub lines: Vec<TailLine { offset: u64, text: String, slot: Option<XraySlot> }>, pub exists: bool,
+    pub truncated: bool,  // Xray: both slots' logs merged by time, each line tagged «слот A/B» (p-lab12)
     pub note: TailNote }   // None | ProxySession | TunnelSession | ServiceSession | ServiceLines | NoService
                            // | ServiceStarting | ServiceStopped (the helper's own pause line) | OldService
 pub fn journal(source, &LogTail, LevelFilter, search: &str, tz) -> Vec<JournalLine>; // newest first, ≤ TAIL_LINES = 2000
-pub struct JournalLine { pub key: u64 /*offset*/, pub time, pub level, pub scope /*tunnel/lifecycle*/, pub text,
+pub enum XraySlot { A, B }  // .letter(); slot B's row keys carry SLOT_B_KEY (1 << 63)
+pub struct JournalLine { pub key: u64 /*offset*/, pub slot: Option<XraySlot>, pub time, pub level, pub scope, pub text,
     pub fields: Vec<(String, String)> /*target, JSON fields, corr: shown on expand*/ }
 pub enum Tab { Events, Connections, Technical }  pub struct PageState { tab, events, filters, period, sort, tech }
 ```

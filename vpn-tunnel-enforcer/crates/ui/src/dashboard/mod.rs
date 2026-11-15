@@ -32,7 +32,7 @@ use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_view::identity::{ExitIp, HomeIp};
 use vpnte_view::labels::FirewallStatus;
 use vpnte_view::mascot::MascotEvent;
-use vpnte_view::swiss::{self, ConnView, SwissInput};
+use vpnte_view::swiss::{self, ConnView, Mode, SwissInput};
 use vpnte_view::traffic;
 
 use crate::hooks::use_watch;
@@ -326,6 +326,18 @@ pub fn Dashboard() -> Element {
     }
 }
 
+/// The routing the mascot speaks of: the session's, or while a connect is under way the mode
+/// it was started in (the saved routing mode).
+fn mascot_mode(view: &DashboardView) -> Option<Mode> {
+    let connecting = view.conn.transition == Some(swiss::Transition::Connecting);
+    let pending = if view.soft_mode {
+        Mode::Soft
+    } else {
+        Mode::Tun
+    };
+    view.conn.mode.or(connecting.then_some(pending))
+}
+
 /// Feeds the mascot bus: the slab's phase, the session start, page activity, the speed band, and
 /// a reaction to every new error / warning / success toast.
 fn use_mascot_feed(dash: &Dash, active: Memo<bool>, sample: Signal<traffic::TrafficSample>) {
@@ -333,8 +345,9 @@ fn use_mascot_feed(dash: &Dash, active: Memo<bool>, sample: Signal<traffic::Traf
     use_effect(move || {
         let view = feed.snapshot();
         let state = swiss::derive_swiss_state(&SwissInput::new(&view.conn, &view.exit));
-        // Before the phase: his lines about the session follow its routing (p-follow3).
-        feed.bus.send(MascotEvent::Mode(view.conn.mode));
+        // Before the phase: his lines about the session follow its routing (p-follow3), also
+        // while it connects (lab L12-7): the session's mode is set once it is connected.
+        feed.bus.send(MascotEvent::Mode(mascot_mode(&view)));
         feed.bus
             .phase(swiss::swiss_phase(state, view.conn.swiss_busy()));
         feed.bus.session_started(view.conn.tun_started_at());

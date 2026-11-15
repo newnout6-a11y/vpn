@@ -12,9 +12,9 @@ use vpnte_ui::panels::{PanelsApi, ProxiesView, Selected, ServersView};
 use vpnte_ui::tray::{QuitMode, TrayApi, TrayState};
 use vpnte_view::traffic::TrafficSample;
 
+use super::Hub;
 use super::actions::Shows;
 use super::proxies::ProxyAction;
-use super::{Hub, project};
 
 /// [`DashboardApi`] over the hub.
 pub(super) struct Dashboard(pub Arc<Hub>);
@@ -59,7 +59,8 @@ impl DashboardApi for Dashboard {
 
     async fn run_leak_check(&self) -> AppResult<Verdict> {
         let report = self.0.leak_check(Source::Ui).await?;
-        Ok(project::leak_verdict(&report))
+        let (status, _) = self.0.shown_check(&report);
+        Ok(status.verdict().unwrap_or(Verdict::NotChecked))
     }
 
     async fn copy_ip(&self, ip: IpAddr) -> AppResult<()> {

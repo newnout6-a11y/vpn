@@ -1,6 +1,8 @@
 {
   "view": {
     "mascot": {
+      "buildingPlain": "Подключаюсь…",
+      "buildingProxy": "Включаю прокси…",
       "connectedProxy0": "Прокси включён. Я на посту.",
       "connectedProxy1": "Прокси работает. Дышим ровно."
     }

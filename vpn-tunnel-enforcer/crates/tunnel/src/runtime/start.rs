@@ -764,7 +764,16 @@ impl Actor {
             .egress_via(&profile.profile, a.port(), a.creds(), settle, op)
             .await
             .map_err(exit_unproven)?;
-        tracing::info!(ms = ms_since(step), "slot A exit proven");
+        // Lab L12-4: a balancer that has not judged its members yet hands the echo any of them,
+        // so the proven exit may be another member's than the session's later reads.
+        let balanced = settle.is_some();
+        let before_settle = settle.is_some_and(|at| step.elapsed() < at);
+        tracing::info!(
+            ms = ms_since(step),
+            balanced,
+            before_settle,
+            "slot A exit proven"
+        );
         Ok(ip)
     }
 

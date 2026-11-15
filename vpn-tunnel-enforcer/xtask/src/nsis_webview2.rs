@@ -107,7 +107,7 @@ fn shipped_branch_uses_the_documented_keys_and_the_pinned_bootstrapper() {
         nsi.contains(r#"!define MUI_FINISHPAGE_TEXT "$(MUI_TEXT_FINISH_INFO_TEXT)$WebView2Note""#)
     );
     let lang = read("installer/lang.nsh");
-    for key in ["WebView2Installing", "WebView2Later"] {
+    for key in ["WebView2Installing", "WebView2Later", "WebView2NotReady"] {
         for language in ["LANG_ENGLISH", "LANG_RUSSIAN"] {
             assert!(lang.contains(&format!("LangString {key} ${{{language}}} \"")));
         }
@@ -124,20 +124,21 @@ impl Drop for ScratchKey {
 }
 
 /// One run of the branch: the registry state before, the stand-in "bootstrapper" command line, and the outcome
-/// as `(version found, exit code, finish-page note shown)`; `beside`: the stand-in must still run when
-/// `StartWebView2` returned (setup goes on meanwhile).
+/// as `(version found, exit code, finish-page note: "", "later" or "not ready")`; `beside`: the stand-in must
+/// still run when `StartWebView2` returned (setup goes on meanwhile).
 struct Case<'a> {
     machine: Option<&'a str>,
     user: Option<&'a str>,
     run: String,
-    expect: (&'a str, &'a str, bool),
+    expect: (&'a str, &'a str, &'a str),
     beside: bool,
 }
 
 /// The branch's decisions, run for real with the pinned NSIS (fetched like `cargo xtask nsis`; skipped when it
 /// cannot be had): runtime found under either key (nothing runs), `0.0.0.0` or empty = missing, a run that
 /// registers the runtime, a failing run, a program that cannot be started, and an exit 0 without registration
-/// (bounded wait, WebView2Feedback #1349). Missing afterwards = the finish-page note, never a stop.
+/// (bounded wait, WebView2Feedback #1349; lab live-12 L12-8: one more run, then «not ready yet», or the runtime
+/// the second run registered). Missing afterwards = the finish-page note, never a stop.
 #[test]
 fn branch_decisions_run_against_a_scratch_key() {
     let root = root();
@@ -159,42 +160,42 @@ fn branch_decisions_run_against_a_scratch_key() {
             machine: Some("120.0.2210.91"),
             user: None,
             run: format!(r#"{reg} add "HKCU\{k}\ran" /f"#),
-            expect: ("120.0.2210.91", "", false),
+            expect: ("120.0.2210.91", "", ""),
             beside: false,
         },
         Case {
             machine: Some("0.0.0.0"),
             user: Some("121.0.1"),
             run: format!(r#"{reg} add "HKCU\{k}\ran" /f"#),
-            expect: ("121.0.1", "", false),
+            expect: ("121.0.1", "", ""),
             beside: false,
         },
         Case {
             machine: Some(""),
             user: None,
             run: format!(r#"{reg} add "HKCU\{k}\user" /v pv /d 1.2.3.4 /f"#),
-            expect: ("1.2.3.4", "0", false),
+            expect: ("1.2.3.4", "0", ""),
             beside: false,
         },
         Case {
             machine: None,
             user: Some("0.0.0.0"),
             run: format!(r#"{reg} query "HKCU\{k}\absent""#),
-            expect: ("", "1", true),
+            expect: ("", "1", "later"),
             beside: false,
         },
         Case {
             machine: None,
             user: None,
             run: r#""$TEMP\vpnte-no-such-bootstrapper.exe" /silent /install"#.to_owned(),
-            expect: ("", "error", true),
+            expect: ("", "error", "later"),
             beside: false,
         },
         Case {
             machine: None,
             user: None,
             run: format!(r#"{reg} query "HKCU\{k}""#),
-            expect: ("", "0", true),
+            expect: ("", "0", "not ready"),
             beside: false,
         },
         // Lab live-9 L9-9: a slow bootstrapper (2 s here) runs while setup goes on; the end waits for it.
@@ -204,8 +205,18 @@ fn branch_decisions_run_against_a_scratch_key() {
             run: format!(
                 r#""$SYSDIR\cmd.exe" /c ping -n 3 127.0.0.1 >nul & reg add HKCU\{k}\user /v pv /d 5.6.7.8 /f"#
             ),
-            expect: ("5.6.7.8", "0", false),
+            expect: ("5.6.7.8", "0", ""),
             beside: true,
+        },
+        // Lab live-12 L12-8: exit 0 without registration; the one more run registers it.
+        Case {
+            machine: None,
+            user: None,
+            run: format!(
+                r#""$SYSDIR\cmd.exe" /c reg query HKCU\{k}\ran >nul 2>&1 && reg add HKCU\{k}\user /v pv /d 7.7.7.7 /f || reg add HKCU\{k}\ran /f"#
+            ),
+            expect: ("7.7.7.7", "0", ""),
+            beside: false,
         },
     ];
     let scratch = root.join("target/xtask/test-scratch/nsis-webview2");
@@ -222,7 +233,7 @@ fn branch_decisions_run_against_a_scratch_key() {
         let (running, version, exit, note) = run_case(&makensis, &scratch, k, i, &case.run);
         let (want_version, want_exit, want_note) = case.expect;
         assert_eq!(
-            (version.as_str(), exit.as_str(), note),
+            (version.as_str(), exit.as_str(), note.as_str()),
             (want_version, want_exit, want_note),
             "case {i}"
         );
@@ -248,7 +259,7 @@ fn run_case(
     key: &str,
     i: usize,
     run: &str,
-) -> (bool, String, String, bool) {
+) -> (bool, String, String, String) {
     let exe = scratch.join(format!("wv2-case-{i}.exe"));
     let out = scratch.join(format!("wv2-case-{i}.txt"));
     let nsh = root().join("installer/webview2.nsh");
@@ -256,8 +267,9 @@ fn run_case(
         "Unicode true\nRequestExecutionLevel user\nSilentInstall silent\nOutFile \"{exe}\"\n\
          !include LogicLib.nsh\n!define WV2_MACHINE_ROOT HKCU\n!define WV2_MACHINE_KEY \"{key}\\machine\"\n\
          !define WV2_USER_KEY \"{key}\\user\"\n!define WV2_RUN '{run}'\n!define WV2_SETTLE_SECONDS 2\n\
-         !include \"{nsh}\"\nLangString WebView2Installing 1033 \"installing\"\n\
-         LangString WebView2Later 1033 \"later\"\nFunction .onInit\n  SetRegView 64\nFunctionEnd\n\
+         !define WV2_RETRY_SECONDS 2\n!include \"{nsh}\"\nLangString WebView2Installing 1033 \"installing\"\n\
+         LangString WebView2Later 1033 \"later\"\nLangString WebView2NotReady 1033 \"not ready\"\n\
+         Function .onInit\n  SetRegView 64\nFunctionEnd\n\
          Section\n  Call StartWebView2\n  StrCpy $5 \"\"\n  ${{If}} $WebView2Process != \"\"\n\
          System::Call 'kernel32::WaitForSingleObject(p $WebView2Process, i 0) i .r5'\n  ${{EndIf}}\n\
          Call EnsureWebView2\n  FileOpen $0 \"{out}\" w\n  FileWrite $0 \"$5|$R0|$R1|$WebView2Note\"\n\
@@ -295,9 +307,10 @@ fn run_case(
     let version = parts.next().unwrap_or_default().to_owned();
     let exit = parts.next().unwrap_or_default().to_owned();
     let note = parts.next().unwrap_or_default();
+    let shown = note.strip_prefix("\r\n\r\n").unwrap_or(note);
     assert!(
-        note.is_empty() || note == "\r\n\r\nlater",
+        note.is_empty() || ["later", "not ready"].contains(&shown) && shown != note,
         "case {i}: note {note:?}"
     );
-    (running, version, exit, !note.is_empty())
+    (running, version, exit, shown.to_owned())
 }

@@ -923,7 +923,8 @@ fn the_same_exit_under_another_vpn_is_no_leak() {
     assert!(exit.leak, "the check itself still calls it a leak");
     let calm = project::calm_exit(exit);
     assert!(!calm.leak);
-    assert_eq!(calm.verdict, Verdict::Warn);
+    // Not checked, not «changed» (lab L12-4).
+    assert_eq!(calm.verdict, Verdict::NotChecked);
     assert_eq!(calm.ip, Some(HOME));
 }
 

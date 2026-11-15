@@ -3,7 +3,8 @@
 ; installed with the app (resources\, pinned in resources/engines.toml), installs it. Run unelevated it installs
 ; for this user only and asks nothing (Microsoft's distribution docs; `/silent /install`, in this order: the reverse
 ; fails). It downloads the runtime, so offline it fails: then one calm line on the finish page says what to do and
-; setup completes; the app offers the same install at its next start.
+; setup completes; the app offers the same install at its next start. An exit 0 that leaves the runtime unregistered
+; gets one more run (lab live-12 L12-8), then its own calm line.
 ; Detection as Microsoft documents it for 64-bit Windows: `pv` under the machine key (the 32-bit view) or under the
 ; user key, anything but empty or 0.0.0.0. The keys and the program are defines so that xtask's test can point
 ; them at a throw-away key and a stand-in.
@@ -20,9 +21,12 @@
 !ifndef WV2_RUN
   !define WV2_RUN '"$INSTDIR\resources\MicrosoftEdgeWebview2Setup.exe" /silent /install'
 !endif
-; Seconds to wait for the registration after a successful exit (see EnsureWebView2).
+; Seconds to wait for the registration after a successful exit (see EnsureWebView2), and after its one retry.
 !ifndef WV2_SETTLE_SECONDS
   !define WV2_SETTLE_SECONDS 120
+!endif
+!ifndef WV2_RETRY_SECONDS
+  !define WV2_RETRY_SECONDS 60
 !endif
 
 Var WebView2Note ; "" or the finish page's extra line when the runtime could not be installed
@@ -93,6 +97,36 @@ Function EnsureWebView2
     Call StartWebView2
   ${EndIf}
   StrCpy $WebView2Note ""
+  StrCpy $R2 ${WV2_SETTLE_SECONDS}
+  Call WaitWebView2
+  ${If} $R1 == ""
+    Return
+  ${EndIf}
+  ; Lab live-12 L12-8: an exit 0 and still nothing registered after the wait. The app's own offer, which runs the
+  ; same program later, worked; one more run here costs about a minute and asks nothing.
+  ${If} $R0 == ""
+  ${AndIf} $R1 == 0
+    DetailPrint "WebView2 runtime not registered after the bootstrapper: running it once more"
+    Call StartWebView2
+    StrCpy $R2 ${WV2_RETRY_SECONDS}
+    Call WaitWebView2
+    ; It ran fine once: not ready yet, whatever the second run says (no internet advice).
+    StrCpy $WebView2Note "$\r$\n$\r$\n$(WebView2NotReady)"
+  ${Else}
+    StrCpy $WebView2Note "$\r$\n$\r$\n$(WebView2Later)"
+  ${EndIf}
+  ${If} $R0 != ""
+    DetailPrint "WebView2 runtime $R0 installed"
+    StrCpy $WebView2Note ""
+    Return
+  ${EndIf}
+  ; Microsoft documents no exit code but 0: the code goes to the log, the user gets what to do.
+  DetailPrint "WebView2 runtime not installed (bootstrapper exit code $R1)"
+FunctionEnd
+
+; Waits for the bootstrapper StartWebView2 started, then (exit 0) up to $R2 seconds for its registration; leaves
+; $R0 and $R1 as EnsureWebView2 describes them.
+Function WaitWebView2
   StrCpy $R1 $WebView2Exit
   ${If} $WebView2Process != ""
     System::Call 'kernel32::WaitForSingleObject(p $WebView2Process, i -1)'
@@ -101,27 +135,16 @@ Function EnsureWebView2
     StrCpy $WebView2Process ""
   ${EndIf}
   Call WebView2Version
-  ${If} $R1 == ""
-    Return
-  ${EndIf}
   ; The bootstrapper can exit 0 before the runtime is registered (WebView2Feedback #1349, still open in 2026):
   ; Microsoft's advice is to wait for the registry value.
   ${If} $R1 == 0
-    StrCpy $R2 0
     ${DoWhile} $R0 == ""
-      ${If} $R2 >= ${WV2_SETTLE_SECONDS}
+      ${If} $R2 <= 0
         ${Break}
       ${EndIf}
       Sleep 1000
-      IntOp $R2 $R2 + 1
+      IntOp $R2 $R2 - 1
       Call WebView2Version
     ${Loop}
   ${EndIf}
-  ${If} $R0 != ""
-    DetailPrint "WebView2 runtime $R0 installed"
-    Return
-  ${EndIf}
-  ; Microsoft documents no exit code but 0: the code goes to the log, the user gets what to do.
-  DetailPrint "WebView2 runtime not installed (bootstrapper exit code $R1)"
-  StrCpy $WebView2Note "$\r$\n$\r$\n$(WebView2Later)"
 FunctionEnd

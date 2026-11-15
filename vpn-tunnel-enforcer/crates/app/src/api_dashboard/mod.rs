@@ -7,6 +7,8 @@
 //! view is a pure projection (`project`) of the latest facts, so equal facts never re-render.
 //! Nothing here needs elevation: privileged answers (`Permission`) come from the tunnel as they are.
 mod actions;
+#[cfg(test)]
+mod exit_tests;
 mod feeds;
 #[cfg(test)]
 mod flows;
@@ -109,7 +111,9 @@ struct Local {
     /// Sequence of kill-switch read-backs: only the latest one lands.
     firewall_seq: u64,
     /// Summary of the last leak check (cleared by every transition).
-    leak: Verdict,
+    leak: LeakFact,
+    /// The same-exit verdict's facts last logged (lab L12-4).
+    exit_facts: Option<project::ExitFacts>,
     /// Bumped by every transition: a check that started before it does not land.
     epoch: u64,
     /// Last seen `(state, transition)` of the snapshot.
@@ -237,11 +241,14 @@ impl Hub {
                 let other_vpn =
                     project::other_vpn(local.foreign.as_ref(), kill_switch.foreign_vpn.is_some());
                 let same_exit = project::same_exit(&snap, &status, &evidence, other_vpn);
+                let facts = project::exit_facts(&snap, &status, &evidence, other_vpn);
                 drop(evidence);
+                log_exit_facts(&mut local.exit_facts, facts);
                 let exit = match same_exit {
                     SameExit::No => exit,
                     SameExit::OtherVpn | SameExit::Server => project::calm_exit(exit),
                 };
+                let leak = local.leak.shown(project::ipv4_explained(&conn, same_exit));
                 DashboardView {
                     foreign_vpn: project::foreign_vpn(&conn, local.foreign.as_ref()),
                     engine: project::engine_line(&status),
@@ -249,7 +256,7 @@ impl Hub {
                     exit,
                     exit_country,
                     firewall: local.firewall,
-                    leak: local.leak,
+                    leak,
                     soft_mode: prefs.soft_mode,
                     smart_ru: prefs.smart_ru,
                     autopick,
@@ -262,7 +269,7 @@ impl Hub {
             }
             None => DashboardView {
                 firewall: local.firewall,
-                leak: local.leak,
+                leak: local.leak.raw,
                 soft_mode: prefs.soft_mode,
                 smart_ru: prefs.smart_ru,
                 ..DashboardView::default()
@@ -331,6 +338,39 @@ impl Hub {
         drop((snap, status, evidence, kill_switch, local));
         set(&self.tray, state);
     }
+}
+
+/// The last leak check's verdict, raw and with its public IPv4 explained by the same exit
+/// ([`project::explained_leak_status`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct LeakFact {
+    raw: Verdict,
+    explained: Verdict,
+}
+
+impl LeakFact {
+    fn of(report: &vpnte_probes::leak::CheckReport) -> Self {
+        let explained = project::explained_leak_status(report).verdict();
+        LeakFact {
+            raw: project::leak_verdict(report),
+            explained: explained.unwrap_or(Verdict::NotChecked),
+        }
+    }
+
+    /// What the start page says: `explained` by [`project::ipv4_explained`] (lab L12-4).
+    fn shown(self, explained: bool) -> Verdict {
+        if explained { self.explained } else { self.raw }
+    }
+}
+
+/// Logs the same-exit verdict's facts when they change on a settled session (lab L12-4: whether
+/// the run's proof saw the address without our VPN), never an address.
+fn log_exit_facts(last: &mut Option<project::ExitFacts>, now: Option<project::ExitFacts>) {
+    if let Some(f) = now.filter(|_| *last != now) {
+        tracing::info!(verdict = ?f.verdict, read_is_home = f.read_is_home, proven = f.proven,
+            other_vpn = f.other_vpn, "same exit verdict");
+    }
+    *last = now;
 }
 
 /// Sends `next` only when it differs from the published value (equal facts never re-render).

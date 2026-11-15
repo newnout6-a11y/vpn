@@ -223,7 +223,8 @@ pub struct MascotView { pub mood: Mood, pub fx: Option<Fx>, pub fx_id: u32 /*rep
     pub body: BodyAnim, pub body_id: u32 /*replay on change*/, pub speech: Option<Speech> }
 pub enum MascotEvent {                                 // Copy + PartialEq
     Phase(MascotPhase),          // swiss_phase(..); only a change does something
-    Mode(Option<swiss::Mode>),   // conn.mode, sent before the phase: «Туннель…» lines only in Tunnel mode (p-follow3)
+    Mode(Option<swiss::Mode>),   // conn.mode, sent before the phase: «Туннель…» lines only in Tunnel mode (p-follow3);
+                                 // while connecting the UI sends the connect's mode: «Строю туннель…» / «Включаю прокси…» (L12-7)
     SpeedBand(f32),              // traffic::speed_band(sample.down_bps()); repeats are ignored
     SessionAge(Option<Duration>),// on a new conn.started_at: Some(fmt::elapsed(t, now_ms())), None = no session
     Activity { on_mascot: bool },// window mousemove/mousedown/keydown/wheel; target inside [data-mascot]

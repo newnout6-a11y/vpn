@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{Verdict, now_ms};
+use vpnte_base::types::now_ms;
 use vpnte_probes::geo::LookupOwner;
 use vpnte_servers::model::{CountrySource, ProfileId, VerifiedCountry};
 use vpnte_servers::store::{Servers, ServersEvent};
@@ -234,7 +234,7 @@ impl Hub {
             let previous = local.phase.replace(phase);
             let changed = previous.is_some_and(|p| p != phase);
             if changed {
-                local.leak = Verdict::NotChecked;
+                local.leak = super::LeakFact::default();
                 local.epoch += 1;
             }
             changed

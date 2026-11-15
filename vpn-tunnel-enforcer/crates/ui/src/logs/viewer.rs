@@ -320,6 +320,9 @@ fn TechLine(line: JournalLine, open: bool, mut expanded: Signal<Option<u64>>) ->
                 onclick: move |_| expanded.set(if open { None } else { Some(key) }),
                 span { class: "lg-line-time", {line.time.clone().unwrap_or_default()} }
                 span { class: "lg-line-level", {line.level.name()} }
+                if let Some(slot) = line.slot {
+                    span { class: "lg-line-scope", {t!("logs.tech.slot", slot = slot.letter())} }
+                }
                 if let Some(scope) = &line.scope {
                     span { class: "lg-line-scope", "{scope}" }
                 }

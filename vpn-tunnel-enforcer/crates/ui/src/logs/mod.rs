@@ -47,7 +47,7 @@ pub use journal::{
 pub use model::{
     ArtifactReport, DisconnectReason, Evidence, EvidenceKey, EvidenceValue, ExportFormat,
     LogSource, LogTail, LogsApi, LogsSnapshot, Mode, Outcome, OutcomeKind, OutcomeTone, SessionRow,
-    TailLine, TailNote, Text,
+    TailLine, TailNote, Text, XraySlot,
 };
 pub use page::LogsPage;
 pub use report::{

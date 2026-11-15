@@ -193,11 +193,10 @@ impl LogsApi for LogsService {
     }
 
     async fn read_log(&self, source: LogSource) -> AppResult<LogTail> {
-        // Slot A: every session's Xray starts there (`xray.log` was never written).
         let (stem, engine) = match source {
             LogSource::App => ("app", None),
             LogSource::SingBox => ("sing-box", Some(EngineLog::SingBox)),
-            LogSource::Xray => ("xray-a", Some(EngineLog::XrayA)),
+            LogSource::Xray => return self.read_xray().await,
             LogSource::Service => {
                 let answer = self.service_logs.read().await?;
                 return Ok(sources::service_tail(answer));
@@ -232,6 +231,30 @@ impl LogsApi for LogsService {
 }
 
 impl LogsService {
+    /// Both Xray slots' logs as one ([`sources::slots_tail`]): a server switch runs the other
+    /// slot (`xray.log` was never written). Slot B adds what it has; its failure hides nothing
+    /// of slot A.
+    async fn read_xray(&self) -> AppResult<LogTail> {
+        let (in_service, note) = self.engine_place();
+        if in_service {
+            let a = self.service_logs.engine(EngineLog::XrayA).await?;
+            let b = match self.service_logs.engine(EngineLog::XrayB).await {
+                Ok(answer @ ServiceAnswer::Lines(_)) => sources::engine_tail(answer, note),
+                _ => LogTail::default(),
+            };
+            return Ok(sources::slots_tail(sources::engine_tail(a, note), b));
+        }
+        let dir = self.shared.folders.user.clone();
+        blocking(move || {
+            let a = sources::read_tail(&dir, "xray-a", note)?;
+            let b = sources::read_tail(&dir, "xray-b", note)
+                .inspect_err(|err| tracing::debug!(error = %err, "xray slot B log not read"))
+                .unwrap_or_default();
+            Ok(sources::slots_tail(a, b))
+        })
+        .await
+    }
+
     /// Whether the engine log to show is the helper service's, and the calm line about it: the
     /// running session's capture, else the last one this app saw (or the newest stored one's).
     fn engine_place(&self) -> (bool, TailNote) {

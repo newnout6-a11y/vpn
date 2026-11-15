@@ -18,6 +18,8 @@ pub(super) const WANDER: [(Perch, Mood, &str); 4] = [
 /// Families of lines; one is picked at random.
 #[derive(Clone, Copy)]
 pub(super) enum Family {
+    /// A connect from off (lab L12-7: «Строю туннель…» was said in Proxy mode too).
+    Building,
     Connected,
     PokeOn,
     PokeOff,
@@ -37,6 +39,9 @@ impl Family {
     /// words, an unknown mode the plain one.
     pub(super) fn lines(self, mode: Option<Mode>) -> &'static [&'static str] {
         match (self, mode) {
+            (Family::Building, Some(Mode::Tun)) => &["mascot.building"],
+            (Family::Building, Some(Mode::Soft)) => &["view.mascot.buildingProxy"],
+            (Family::Building, None) => &["view.mascot.buildingPlain"],
             (Family::Connected, Some(Mode::Tun)) => &[
                 "mascot.connected0",
                 "mascot.connected1",
