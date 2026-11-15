@@ -199,9 +199,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let files = DataFiles::new(&root);
         let fresh = files.secure().map(|()| sddl::path_private(&files.logs));
-        // As before 15.11: the folder inherited «Users: read», and so did its logs.
-        let old = set_dacl(&files.logs, sddl::ADMIN_ONLY_DIR_SDDL)
-            .and_then(|()| std::fs::write(files.logs.join("sing-box.log"), b"line\n"));
+        // As before 15.11: the folder inherited «Users: read», and so did its logs. The service
+        // wrote them as SYSTEM; a file this elevated test wrote plainly would be owned by its own
+        // user (Windows makes the creator the owner) and never read private, so the log is
+        // created owned by Administrators, as trusted as SYSTEM (CI 15.11: «log false» came from
+        // the owner, not the DACL; the staging folder's elevated test writes the same way).
+        let old = set_dacl(&files.logs, sddl::ADMIN_ONLY_DIR_SDDL).and_then(|()| {
+            let mut log = sddl::create_admin_owned(&files.logs.join("sing-box.log"))?;
+            std::io::Write::write_all(
+                &mut log, b"line
+",
+            )
+        });
         let private_before = sddl::path_private(&files.logs.join("sing-box.log"));
         let repaired = files.secure().map(|()| {
             (
