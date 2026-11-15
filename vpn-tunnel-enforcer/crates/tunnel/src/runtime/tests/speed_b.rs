@@ -305,6 +305,28 @@ async fn a_silent_fresh_candidate_restores_the_previous_slot() {
     assert!(back.is_some_and(|a| a < stop_b), "{:?}", w.log());
 }
 
+/// Review tunready-a5: a read of the candidate's downloads that stalls (a Clash snapshot may take
+/// up to 4 s) never holds an unproven candidate past its 2 s budget: the read runs inside the
+/// select with the deadline, so the previous slot is selected again at 2.1 s, not after the read.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_traffic_read_never_holds_a_fresh_candidate_past_its_budget() {
+    let (w, h) = switching(true).await;
+    w.egress_silent.store(true, Ordering::SeqCst);
+    w.downloads_ms.store(4_000, Ordering::SeqCst);
+    let began = w.now_ms();
+    let (receipt, _) = switch(&w, &h, Origin::User).await;
+    assert!(!receipt.committed, "{receipt:?}");
+    let b = w.ms("select:b");
+    let back = (w.stamps.lock().iter())
+        .find(|(s, at)| s == "select:a" && *at > b)
+        .map(|(_, at)| at - began);
+    // Selected at 100 ms, its 2 s budget: back by 2.1 s (the stalled read would end at 4.1 s).
+    assert!(
+        back.is_some_and(|ms| (2_100..2_500).contains(&ms)),
+        "{back:?}"
+    );
+}
+
 /// speed3 S3-07: with the name's handshake budget spent the switch still selects first, and
 /// the candidate's traffic proves it (no echo, no probe).
 #[tokio::test(start_paused = true)]
@@ -481,8 +503,8 @@ impl Engines for Balancer {
     ) -> AppResult<Vec<(String, u64)>> {
         self.fake.slot_downloads(clash, slot).await
     }
-    fn handshake_ready(&self, server: &Profile) -> bool {
-        self.fake.handshake_ready(server)
+    fn handshake_wait(&self, server: &Profile) -> Duration {
+        self.fake.handshake_wait(server)
     }
     async fn resolve(
         &self,

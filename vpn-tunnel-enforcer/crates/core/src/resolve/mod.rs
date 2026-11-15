@@ -181,7 +181,8 @@ pub async fn resolve_ahead(name: &str) -> Result<Vec<IpAddr>, ResolveError> {
     };
     let lookup = async {
         let found = foreign().resolve_dial(&name, &|_| true).await;
-        // Remembered before the lookup leaves the flight: no asker falls between the two.
+        // Remembered before the lookup leaves the flight: [`recall`] reads the flight first, so
+        // no asker falls between the two.
         if let Ok(addrs) = &found {
             remember(&name, addrs.clone());
         }
@@ -198,10 +199,8 @@ pub async fn recall(name: &str) -> Option<Vec<IpAddr>> {
     let Ok(Host::Name(name)) = Host::parse(name) else {
         return None;
     };
-    if let Some(addrs) = session::kept(&name).or_else(|| session::recent(&name)) {
-        return Some(addrs);
-    }
-    ahead::join(session::owner().as_deref(), &name).await
+    let memory = || session::kept(&name).or_else(|| session::recent(&name));
+    ahead::recall(session::owner().as_deref(), &name, memory).await
 }
 
 /// An address a server may have, as every lookup here judges it (block pages, loopback,

@@ -2,6 +2,7 @@
   "ui": {
     "dashboard": {
       "provingExit": "Checking the exit…",
+      "provingSlot": "the server takes a new connection in {{seconds}} s",
       "sameExit": "The address is the same as without our VPN: another VPN already runs on this PC.",
       "sameExitServer": "The exit address is the same as without our VPN: this server goes out to the internet from that same address.",
       "netmodeWhitelist": "Servers marked «Whitelists» are tried first",

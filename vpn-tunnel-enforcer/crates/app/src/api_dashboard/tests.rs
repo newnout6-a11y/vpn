@@ -897,6 +897,35 @@ fn proving_exit_is_the_connect_between_engine_and_session() {
     assert!(!project::proving_exit(&connected, &engine_up));
 }
 
+/// Lab live-13 L13-2: while the connect proves its exit and its proof waits for the server's
+/// handshake slot, the page gets the moment the slot comes; never outside the proof.
+#[test]
+fn the_page_gets_the_slot_wait_only_while_proving() {
+    use vpnte_base::types::Engine;
+    use vpnte_tunnel::api::EngineRun;
+    let connecting = TunnelSnapshot {
+        transition: Some(Transition::Connecting),
+        ..TunnelSnapshot::default()
+    };
+    let waiting = TunStatus {
+        engine: Some(EngineRun {
+            kind: Engine::Xray,
+            reason: None,
+        }),
+        proof_waits_until: Some(1_700_000_020_000),
+        ..TunStatus::default()
+    };
+    let at = project::proof_waits_until(&connecting, &waiting);
+    assert_eq!(at, Some(1_700_000_020_000));
+    let slot_came = TunStatus {
+        proof_waits_until: None,
+        ..waiting.clone()
+    };
+    assert_eq!(project::proof_waits_until(&connecting, &slot_came), None);
+    let idle = TunnelSnapshot::default();
+    assert_eq!(project::proof_waits_until(&idle, &waiting), None);
+}
+
 /// p-live2 (owner): another VPN on this PC (the owner's Happ on the same provider) makes the exit
 /// equal to the address measured without ours. With another VPN in sight that is one calm line,
 /// not a leak; without one the same match stays a leak.

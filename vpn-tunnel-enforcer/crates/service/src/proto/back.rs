@@ -72,6 +72,8 @@ impl From<StatusWire> for TunStatus {
             session: w.session.map(Into::into),
             listed_only: w.listed_only,
             proven_exit: w.proven_exit,
+            // The service's starts take no handshake gate: nothing waits for a slot there.
+            proof_waits_until: None,
         }
     }
 }

@@ -10,8 +10,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::watch;
 use vpnte_base::AppResult;
-use vpnte_service::proto::{PROTOCOL, SCOPE_PROTOCOL};
-use vpnte_ui::helper::{Ability, Capability, HelperApi, Lack, Service};
+use vpnte_service::proto::PROTOCOL;
+use vpnte_ui::helper::{Ability, Capability, HelperApi, Service};
 
 use crate::boot::service::Presence;
 use crate::services::Backend;
@@ -79,10 +79,9 @@ pub(crate) fn derive(f: Facts) -> Capability {
         (true, _) if f.starting => Service::Starting,
         // Review wire5-a1: no link at all is no current service; its update is what helps.
         (true, _) if f.outdated => Service::Outdated,
-        (true, _) => match f.protocol {
-            Some(p) if p < PROTOCOL => Service::Older { lacks: lacks(p) },
-            _ => Service::Installed,
-        },
+        // One version back (the oldest a link speaks to): it carries everything as it is.
+        (true, _) if f.protocol.is_some_and(|p| p < PROTOCOL) => Service::Older,
+        (true, _) => Service::Installed,
     };
     // One owner of the TUN and our WFP objects: the service when it is installed, also when
     // this process happens to be elevated (the guard's rule).
@@ -105,15 +104,6 @@ pub(crate) fn derive(f: Facts) -> Capability {
         },
         capture: Ability::NotInVersion,
     }
-}
-
-/// What a service speaking `protocol` does not do yet, as the user would notice it.
-fn lacks(protocol: u32) -> Vec<Lack> {
-    let mut lacks = Vec::new();
-    if protocol < SCOPE_PROTOCOL {
-        lacks.push(Lack::AppScope);
-    }
-    lacks
 }
 
 /// The capability view right now (the pages that read it at an action, not live).

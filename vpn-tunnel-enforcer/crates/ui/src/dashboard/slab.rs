@@ -67,6 +67,9 @@ pub(super) fn Slab(servers: Signal<ServersView>, local_pings: Signal<LocalPings>
                         aria_live: "polite",
                         {tr(&caption(conn, view.proving_exit))}
                     }
+                    if let Some(until) = view.proof_waits_until.filter(|_| !conn.cancelling) {
+                        SlotWait { key: "{until}", until }
+                    }
                     if let Some(since) = conn.uptime_since() {
                         Uptime { since }
                     }
@@ -86,6 +89,51 @@ fn caption(conn: &ConnView, proving_exit: bool) -> Msg {
         return Msg::new("ui.dashboard.provingExit");
     }
     status_label(conn)
+}
+
+/// Lab live-13 L13-2: while the exit proof waits for the server's handshake slot, the caption
+/// goes on with the seconds left. Outside the live region, like the uptime: the reader is not
+/// told every second. Nothing once the slot came (the status drops the wait then).
+#[component]
+fn SlotWait(until: UnixMs) -> Element {
+    let active = use_page_active();
+    let mut now = use_signal(now_ms);
+    use_resource(move || {
+        let shown = active();
+        async move {
+            if !shown {
+                return;
+            }
+            loop {
+                let at = now_ms();
+                now.set(at);
+                let left = until - at;
+                if left <= 0 {
+                    return;
+                }
+                // wake when the count changes
+                let ms = match left % 1_000 {
+                    0 => 1_000,
+                    part => part,
+                };
+                tokio::time::sleep(Duration::from_millis(ms as u64 + 5)).await;
+            }
+        }
+    });
+    let Some(line) = slot_wait_line(until, now()) else {
+        return rsx! {};
+    };
+    rsx! {
+        span { class: "swiss-uptime", {tr(&line)} }
+    }
+}
+
+/// «…сервер примет новое соединение через N с»: whole seconds left, rounded up; `None` once
+/// the slot came.
+fn slot_wait_line(until: UnixMs, now: UnixMs) -> Option<Msg> {
+    let left = until - now;
+    let seconds = (left + 999) / 1_000;
+    (left > 0).then(|| Msg::new("ui.dashboard.provingSlot").arg("seconds", seconds))
 }
 
 /// The big state word, sized by `dashboard.js` so every word is equally wide (decorative: the
@@ -463,6 +511,32 @@ mod tests {
             ..connecting
         };
         assert_eq!(caption(&cancelling, true).key, "dashboard.cancelling");
+    }
+
+    /// Lab live-13 L13-2: while the proof waits for the server's handshake slot the caption goes
+    /// on with the whole seconds left (rounded up, one calm sentence in ru and en); nothing once
+    /// the slot came.
+    #[test]
+    fn the_caption_counts_down_to_the_handshake_slot() {
+        let now = 1_700_000_000_000;
+        let seconds = |until| slot_wait_line(until, now).map(|m| m.args[0].1.clone());
+        assert_eq!(seconds(now + 20_000).as_deref(), Some("20"));
+        assert_eq!(seconds(now + 19_001).as_deref(), Some("20"));
+        assert_eq!(seconds(now + 19_000).as_deref(), Some("19"));
+        assert_eq!(seconds(now + 1).as_deref(), Some("1"));
+        assert_eq!(seconds(now), None);
+        assert_eq!(seconds(now - 5), None);
+        crate::test_locales::init_locales();
+        let line = slot_wait_line(now + 20_000, now).expect("waits");
+        use vpnte_base::i18n::Lang;
+        assert_eq!(
+            line.render(Lang::Ru),
+            "сервер примет новое соединение через 20 с"
+        );
+        assert_eq!(
+            line.render(Lang::En),
+            "the server takes a new connection in 20 s"
+        );
     }
 
     fn progress_root() -> Element {

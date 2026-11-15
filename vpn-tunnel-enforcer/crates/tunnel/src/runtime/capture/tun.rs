@@ -120,15 +120,6 @@ impl Capture for TunCapture {
         Ok(singbox_config::compat_key(&tun_inputs(plan, parts)))
     }
 
-    fn config_excluding(
-        &self,
-        plan: &CapturePlan,
-        parts: &EngineParts,
-        servers: &[IpAddr],
-    ) -> Result<(Value, [u8; 32]), ConfigError> {
-        tun_config_excluding(plan, parts, servers)
-    }
-
     async fn begin(&self, plan: &CapturePlan, session_programs: &[PathBuf]) -> AppResult<()> {
         let protection = self.protection.clone();
         let programs = session_programs.to_vec();
@@ -320,18 +311,9 @@ pub(crate) fn tun_config(
     plan: &CapturePlan,
     parts: &EngineParts,
 ) -> Result<(Value, [u8; 32]), ConfigError> {
-    tun_config_excluding(plan, parts, &[])
-}
-
-/// [`tun_config`] with `servers` kept out of the TUN's routes (lab live-11 L11-2).
-pub(crate) fn tun_config_excluding(
-    plan: &CapturePlan,
-    parts: &EngineParts,
-    servers: &[IpAddr],
-) -> Result<(Value, [u8; 32]), ConfigError> {
     let inputs = tun_inputs(plan, parts);
     Ok((
-        singbox_config::build_with_servers(&inputs, servers)?,
+        singbox_config::build(&inputs)?,
         singbox_config::compat_key(&inputs),
     ))
 }

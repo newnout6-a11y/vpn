@@ -246,7 +246,8 @@ fn the_wrapper_implements_every_capture_method() {
     let wrapper_source = include_str!("../watchdog.rs");
     let wanted = methods(trait_source, "pub trait Capture: Send + Sync {");
     let wrapped = methods(wrapper_source, "impl<C: Capture> Capture for Engaged<C> {");
-    assert!(wanted.len() >= 14, "the trait was read: {wanted:?}");
+    // 13 since `config_excluding` went (p-fix-review8, review tunready-a1/b1).
+    assert!(wanted.len() >= 13, "the trait was read: {wanted:?}");
     let missing: Vec<_> = wanted.iter().filter(|m| !wrapped.contains(m)).collect();
     assert!(missing.is_empty(), "Engaged does not forward {missing:?}");
 }

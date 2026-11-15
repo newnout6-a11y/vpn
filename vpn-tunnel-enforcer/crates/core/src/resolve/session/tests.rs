@@ -97,3 +97,20 @@ async fn a_failed_start_drops_its_remembered_names() {
     remember("empty.s3-09.invalid", Vec::new());
     assert_eq!(recent("empty.s3-09.invalid"), None);
 }
+
+/// Review tunready-a2: a profile keeps its host as written, the answers are stored by the parsed
+/// (lowercase) name. A failed start or switch that dialled «Stale-Case…» drops both its kept and
+/// its recent answer; before, the exact compare dropped nothing and every retry dialled them.
+#[tokio::test]
+async fn a_failed_start_drops_a_name_written_with_capitals() {
+    let _one = SESSIONS.lock().await;
+    let (written, stored) = ("Stale-Case.S3-09.invalid", "stale-case.s3-09.invalid");
+    keep_resolved(80_000, &[(written.to_owned(), vec![ip("203.0.113.27")])]);
+    remember(written, vec![ip("203.0.113.28")]);
+    assert_eq!(kept(stored), Some(vec![ip("203.0.113.27")]), "kept");
+    assert_eq!(recent(stored), Some(vec![ip("203.0.113.28")]), "recent");
+    drop_names(&[written.to_owned()]);
+    assert_eq!(kept(stored), None, "kept");
+    assert_eq!(recent(stored), None, "recent");
+    end_session();
+}

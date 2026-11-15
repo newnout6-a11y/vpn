@@ -17,6 +17,7 @@
       "restartStopFailed": "The restart failed: the previous connection did not stop. Disconnect and connect again.",
       "restartCancelled": "Restart cancelled",
       "switchUnconfirmed": "The new server did not confirm internet access.",
+      "tunSlow": "The first pages may open slower than usual.",
       "tunSetup": {
         "adapter": "The tunnel interface did not come up; the connection was cancelled.",
         "protection": "The kill switch was not confirmed. The start was cancelled.",

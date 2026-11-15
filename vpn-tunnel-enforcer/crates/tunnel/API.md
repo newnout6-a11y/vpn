@@ -37,7 +37,9 @@ pub struct StartRequest { pub mode: Mode, pub capture: CaptureKind, pub kill_swi
     pub public_wifi: bool, pub stealth: bool, pub adaptive: AdaptiveMode, pub engine: EnginePref,
     pub origin: Origin }                                             // capture: a strategy the host lacks -> Permission
 pub struct StartReceipt { pub generation: u64, pub pid: u32, pub started_at: UnixMs, pub engine: EngineRun,
-    pub warnings: Vec<Msg> }                                         // warnings include Xray's dropped settings
+    pub warnings: Vec<Msg> }                                         // warnings include Xray's dropped settings;
+    // a TUN whose readiness probe got no answer within 3 s: `tunnel.runtime.tunSlow` (review
+    // tunready-b2: «Первые страницы могут открываться медленнее обычного.»; the start goes on)
 pub struct StopOptions { pub preserve_protection: bool, pub preserve_last: bool }   // Default = full stop
 pub struct StopReceipt { pub operation_id: String /* stop_<32 hex> */, pub ok: bool, pub runtime_stopped: bool,
     pub forced: bool /* sing-box was killed: no own exit within GRACEFUL_STOP after CTRL_BREAK */,
@@ -56,7 +58,10 @@ pub struct TunStatus { pub running: bool, pub mode: Option<ModeKind>, pub proxy_
     pub session: Option<SessionEndpoints> /* #[serde(skip)]: secrets never serialized */,
     pub listed_only: Option<bool> /* p-wire5 live2-a3: the app scope the run was built with */,
     pub proven_exit: Option<IpAddr> /* p-wire5 L10-7: the exit proof's address (start, then each
-        committed switch); None: no address proven (local proxy, proof by traffic) */ }
+        committed switch); None: no address proven (local proxy, proof by traffic) */,
+    pub proof_waits_until: Option<UnixMs> /* lab L13-2: a start's slot-A proof waits for the server
+        name's handshake slot until then (wall clock); set before the gated echo, cleared when the
+        slot comes or the proof ends or is dropped; the service's wire leaves it out (no gate) */ }
 pub struct SessionEndpoints { pub clash_port: u16, pub clash_secret: String, pub direct: ProxyEndpoint,
     pub probe: Option<ProxyEndpoint>, pub tun_luid: Option<u64>, pub tun_alias: Option<String>,
     pub proxy_port: Option<u16> /* mixed inbound of a proxy capture */, pub logs: Vec<PathBuf> }
@@ -508,7 +513,8 @@ pub struct ProxyCapture;  impl ProxyCapture { pub fn new() -> Self;   // + Defau
     async fn upstream_downloads(&self, clash: &ClashEndpoint) -> AppResult<Vec<(String, u64)>>;
     async fn slot_downloads(&self, clash: &ClashEndpoint, slot: Slot) -> AppResult<Vec<(String, u64)>>;
                                 // p-speed F4: the connections through one Xray slot only
-    fn handshake_ready(&self, server: &Profile) -> bool;   // p-speed F4: the gate would not wait now
+    fn handshake_wait(&self, server: &Profile) -> Duration; // p-speed F4: the gate's wait now (zero:
+                                // free); L13-2: a start's proof publishes it as `proof_waits_until`
     async fn resolve(&self, hosts: &[String], path: ResolvePath, cancel: &CancellationToken)
         -> Result<Resolved, ResolveFault>;
     async fn egress_via(&self, server: &Profile, port: u16, creds: &Creds, settle: Option<Duration>,
@@ -539,7 +545,7 @@ pub struct ProxyCapture;  impl ProxyCapture { pub fn new() -> Self;   // + Defau
 // the app's handshake budget (probe discipline): the tunnel cannot depend on vpnte-probes
 #[async_trait] pub trait HandshakeGate: Send + Sync {
     async fn admit(&self, server: &Profile, cancel: &CancellationToken) -> AppResult<()>;  // Err: deferred / cancelled
-    fn ready_now(&self, server: &Profile) -> bool; }  // p-speed F4: `admit` would not wait now
+    fn wait_now(&self, server: &Profile) -> Duration; }  // how long `admit` would wait now (zero: at once)
 #[derive(Debug, Clone, PartialEq, Eq)] pub struct EngineExes { pub singbox: PathBuf, pub xray: PathBuf }  // canonical paths
 pub struct RealEngines;
 impl RealEngines { pub fn new(singbox: PathBuf, xray: PathBuf, logs: Option<PathBuf>) -> Self   // fixed (helper service)
@@ -626,7 +632,7 @@ through the core's `live-check-in` in both captures (the user's rules never appl
 Step lines: `slot A exit proof begins start=…`, `handshake slot ms=… request=first|next`,
 `slot A proven by its traffic ms=…`, `physical dns read ms=…`, `xray ready by=line|poll`,
 `dns warm-up answered ms=… answered=…`. An in-place switch whose
-server name has no handshake budget left (`Engines::handshake_ready`) selects the candidate without
+server name has no handshake budget left (`Engines::handshake_wait` not zero) selects the candidate without
 a proof of its own and takes the traffic it carries within 3 s as the proof; an idle session then
 gets the skipped probe, behind the budget as before (lab live-7 F4). Proxy capture: the plan guard is the request's kill switch (`off` /
 `standard`; `strict` -> `Validation`, `tunnel.runtime.proxy.strictUnavailable`), nothing to engage or

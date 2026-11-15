@@ -34,6 +34,7 @@ mod handle;
 mod mihomo;
 mod pin;
 mod recovery;
+mod slot_wait;
 mod spawn;
 mod start;
 mod stop;

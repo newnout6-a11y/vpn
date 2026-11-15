@@ -109,12 +109,21 @@ pub fn forget(owner: &str) {
 }
 
 /// A start that dialled `names` failed at the dial or the exit proof: what this process kept or
-/// remembered of them goes, so the next start asks the resolvers (S3-09 (e)).
+/// remembered of them goes, so the next start asks the resolvers (S3-09 (e)). Matched as parsed
+/// names, as they are stored: a profile keeps its host as written (review tunready-a2: a failed
+/// switch to «NL1.Provider.net» dropped nothing and every retry dialled the stale answer).
 pub fn drop_names(names: &[String]) {
+    let names: Vec<String> = names
+        .iter()
+        .filter_map(|n| match Host::parse(n) {
+            Ok(Host::Name(name)) => Some(name),
+            _ => None,
+        })
+        .collect();
     if let Some(kept) = KEPT.lock().as_mut() {
         kept.names.retain(|n, _| !names.contains(n));
     }
-    drop_of(owner().as_deref(), names);
+    drop_of(owner().as_deref(), &names);
 }
 
 fn drop_of(owner: Option<&str>, names: &[String]) {

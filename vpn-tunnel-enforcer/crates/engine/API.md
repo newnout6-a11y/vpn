@@ -149,14 +149,6 @@ pub enum ConfigError { InvalidSlots(&'static str), InvalidListeners(&'static str
     InvalidTun(&'static str), BadUpstream(&'static str), BadRouting(String) }   // -> Internal, "engine.config.invalid"
 
 pub fn build(i: &ConfigInputs) -> Result<serde_json::Value, ConfigError>;
-pub fn build_with_servers(i: &ConfigInputs, servers: &[IpAddr])   // build + `servers` kept out of
-    -> Result<serde_json::Value, ConfigError>;                    // the TUN routes (live-11 L11-2);
-                                                                  // not in compat_key; proxy: ignored
-pub fn xray_servers(graph: &ProxyGraph) -> Vec<IpAddr>;  // IP literals an Xray slot dials itself
-    // (after `substitute`): vless/vmess/trojan/shadowsocks/hysteria/wireguard/socks/http servers,
-    // XHTTP download, WireGuard peers; selected first, unique; chained hops (proxySettings,
-    // sockopt.dialerProxy), `dns` outbounds and names skipped; at most MAX_XRAY_SERVERS
-pub const MAX_XRAY_SERVERS: usize;                 // 16: each /32 adds up to 31 TUN routes
 pub fn select_mtu(stealth: bool, adaptive: AdaptiveMode, public_wifi: bool) -> u16; // 1280 | 1380 | 1500
 pub fn compat_key(i: &ConfigInputs) -> [u8; 32];   // equal keys: a running config can serve the new
                                                    // upstream (ignores profile, slots, listener ports,
@@ -204,12 +196,12 @@ Rules the caller must keep (review of the WFP / TUN design):
   mode off and sing-box then refuses them. `strategy: ipv4_only`; TUN configs add `optimistic: {enabled: true, timeout: "1h"}` (speed3
   S3-13 (a): memory only, never `cache_file`). Clash API on
   `127.0.0.1:clash_port` with `clash_secret`.
-- Upstream server IPs are excluded from the TUN routes (Native); slot mode excludes what the
-  caller passes to `build_with_servers` (the starting slot's `xray_servers`, live-11 L11-2) and
-  still needs the Xray exe in `RoutingInputs::engine_paths` (process rule -> direct) for the rest:
-  a switch keeps the running config (the new slot's servers go through the TUN by that rule, the
-  old slot's stay excluded until sing-box restarts), names Xray resolves itself, servers past the
-  bound.
+- Upstream server IPs are excluded from the TUN routes (Native); slot mode excludes nothing:
+  pass the Xray exe in `RoutingInputs::engine_paths` (process rule -> direct) instead. A route
+  exclusion holds for every program (a CDN-fronted server's address serves other sites too) and a
+  switch keeps the running config, so the slots' servers stay inside the TUN (review tunready-a1/b1,
+  which removed live-11 L11-2's exclusion; Xray 26.11.9's `sockopt.interface` binds a fixed adapter
+  name on Windows, stale after a network change).
 - sing-box 1.14.4 `check` decodes a rule whose action is not `route` leniently (unknown keys
   pass); only a `route` rule is decoded strictly (`check.rs` `the_probe_rules_keys_are_real_rule_keys`).
 

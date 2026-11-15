@@ -76,14 +76,15 @@ async fn an_installed_service_leaves_only_what_this_version_lacks() {
     assert!(!seen.shows(&text(&dom, "ui.settings.browser.apply")));
 }
 
-/// An older service: one line under Tunnel mode says what it does not do yet; no install.
+/// An older service (one protocol version back, the oldest the app links to) carries Tunnel mode
+/// and the kill switch as it is and updates itself: no line, no install (p-fix-review8: the
+/// app-scope line could no longer show after protocol 5).
 #[tokio::test]
-async fn an_older_service_says_what_it_does_not_do_yet() {
+async fn an_older_service_says_nothing_and_offers_no_install() {
     let (dom, seen) = page(HelperScene::Older).await;
-    assert!(seen.has("data-lack", "app-scope"));
-    assert!(seen.shows(&text(&dom, "ui.helper.older.appScope")));
-    assert!(!seen.shows(&text(&dom, "ui.helper.install")));
+    assert!(!seen.has("data-helper", "tunnel"));
     assert!(!seen.has("data-helper", "kill-switch"));
+    assert!(!seen.shows(&text(&dom, "ui.helper.install")));
 }
 
 /// An elevated app without the service: everything it hosts works in-process, as before; no

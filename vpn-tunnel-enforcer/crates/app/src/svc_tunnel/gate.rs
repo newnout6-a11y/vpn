@@ -30,8 +30,8 @@ impl HandshakeGate for BudgetGate {
         Ok(())
     }
 
-    fn ready_now(&self, server: &Profile) -> bool {
-        Endpoint::of(server).is_none_or(|endpoint| budget().wait_for(&endpoint).is_zero())
+    fn wait_now(&self, server: &Profile) -> Duration {
+        Endpoint::of(server).map_or(Duration::ZERO, |endpoint| budget().wait_for(&endpoint))
     }
 }
 

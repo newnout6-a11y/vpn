@@ -54,9 +54,9 @@ pub(super) fn upstream(up: &Upstream) -> Result<UpstreamParts, ConfigError> {
             Ok(UpstreamParts {
                 outbounds,
                 endpoints: Vec::new(),
-                // The slots' servers are Xray's to dial: the caller excludes the starting slot's
-                // ones (`build_with_servers`, lab live-11 L11-2), and the process rule bypasses
-                // whatever is left (a switch keeps this config, names Xray resolves itself).
+                // No route exclusion for the slots' servers: it lets every program reach them
+                // outside the TUN (a CDN-fronted server's address serves other sites too, review
+                // tunready-a1/b1) and outlives a switch. Xray's own dials leave by its process rule.
                 exclude: Vec::new(),
                 needs_bootstrap: false,
                 block_quic: udp.block_quic,

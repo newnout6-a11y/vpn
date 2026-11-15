@@ -35,8 +35,12 @@ impl HandshakeGate for Gate {
         ))
     }
 
-    fn ready_now(&self, _server: &Profile) -> bool {
-        self.seen.load(Ordering::SeqCst) < self.allow
+    fn wait_now(&self, _server: &Profile) -> std::time::Duration {
+        if self.seen.load(Ordering::SeqCst) < self.allow {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_secs(42)
+        }
     }
 }
 

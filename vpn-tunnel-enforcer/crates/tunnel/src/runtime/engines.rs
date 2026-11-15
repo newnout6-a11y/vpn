@@ -95,8 +95,8 @@ pub trait Engines: Send + Sync {
         clash: &ClashEndpoint,
         slot: Slot,
     ) -> AppResult<Vec<(String, u64)>>;
-    /// A new handshake to `server` would be admitted now, without waiting for the budget.
-    fn handshake_ready(&self, server: &Profile) -> bool;
+    /// How long a new handshake to `server` waits for the budget now (zero: admitted at once).
+    fn handshake_wait(&self, server: &Profile) -> Duration;
     /// Resolves server names before an engine dials them: Xray's (Xray itself must never
     /// resolve: it would loop) and a native profile's (pinned, see `pin`).
     async fn resolve(
@@ -174,8 +174,8 @@ pub trait HandshakeGate: Send + Sync {
     /// Waits for a handshake slot to `server`; `Err` = not now (the budget's "retry in N s") or
     /// cancelled.
     async fn admit(&self, server: &Profile, cancel: &CancellationToken) -> AppResult<()>;
-    /// [`HandshakeGate::admit`] would not wait now.
-    fn ready_now(&self, server: &Profile) -> bool;
+    /// How long [`HandshakeGate::admit`] would wait for a slot now (zero: at once).
+    fn wait_now(&self, server: &Profile) -> Duration;
 }
 
 #[async_trait]
@@ -661,8 +661,10 @@ impl Engines for RealEngines {
             .collect())
     }
 
-    fn handshake_ready(&self, server: &Profile) -> bool {
-        self.gate.as_ref().is_none_or(|gate| gate.ready_now(server))
+    fn handshake_wait(&self, server: &Profile) -> Duration {
+        self.gate
+            .as_ref()
+            .map_or(Duration::ZERO, |gate| gate.wait_now(server))
     }
 
     async fn warm_dns(&self, clash: &ClashEndpoint) {
@@ -1116,8 +1118,8 @@ connection: close
             }
             Ok(())
         }
-        fn ready_now(&self, _server: &Profile) -> bool {
-            false
+        fn wait_now(&self, _server: &Profile) -> Duration {
+            self.wait
         }
     }
 

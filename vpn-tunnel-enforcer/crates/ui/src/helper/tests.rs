@@ -46,7 +46,6 @@ fn expected(scene: HelperScene, feature: Feature) -> (Option<&'static str>, Opti
         (Missing, Tunnel) => (Some("tunnel"), Some("install")),
         (Missing, KillSwitch) => (Some("killSwitch"), Some("install")),
         (Outdated, Tunnel | KillSwitch) => (Some("outdated"), Some("update")),
-        (Older, Tunnel) => (Some("older.appScope"), None),
         (_, Capture) | (Missing | Installed | Older | Outdated, Policies) => {
             (Some("notInVersion"), None)
         }
@@ -149,7 +148,6 @@ fn every_helper_text_exists_in_both_languages_and_is_calm() {
         "viaService",
         "notInVersion",
         "install",
-        "older.appScope",
         "outdated",
         "update",
         "strip.title",
@@ -187,7 +185,6 @@ fn abilities_say_what_works() {
     assert!(Ability::Service.works() && Ability::InProcess.works());
     assert!(!Ability::NeedsService.works() && !Ability::NotInVersion.works());
     let older = HelperScene::Older.capability();
-    assert_eq!(older.lacks(), &[Lack::AppScope]);
-    assert!(HelperScene::Installed.capability().lacks().is_empty());
+    assert_eq!(older.service.pause_key(), None);
     assert_eq!(older.ability(Feature::Tunnel), Ability::Service);
 }

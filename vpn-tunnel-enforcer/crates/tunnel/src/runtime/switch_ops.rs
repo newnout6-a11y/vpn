@@ -170,14 +170,17 @@ impl RuntimeSwitch<'_> {
         let mut silent: Option<AppError> = None;
         let started = tokio::time::Instant::now();
         let back = loop {
-            if self.carries(slot).await {
-                if self.fresh {
-                    tracing::info!(?slot, "switch: the fresh candidate carries traffic");
-                } else {
-                    tracing::info!(?slot, "switch: the candidate carries traffic");
+            // Review tunready-a5: the read (a Clash snapshot, up to 4 s) races the deadline and
+            // the cancel too, so an unproven candidate never holds the traffic past `within`.
+            // A balanced candidate's longer wait reads the connections less often.
+            let wait = poll(started.elapsed(), self.timings.confirm_candidate);
+            let read = async {
+                let carries = self.carries(slot).await;
+                if !carries {
+                    tokio::time::sleep(wait).await;
                 }
-                break Ok(None);
-            }
+                carries
+            };
             tokio::select! {
                 // Nothing came back, whichever deadline came first: the echo's own verdict.
                 () = &mut deadline => {
@@ -197,8 +200,15 @@ impl RuntimeSwitch<'_> {
                     }
                     Err(e) => break Err(e),
                 },
-                // A balanced candidate's longer wait reads the connections less often.
-                () = tokio::time::sleep(poll(started.elapsed(), self.timings.confirm_candidate)) => {}
+                // `false` comes after the poll's wait: the next turn reads again.
+                carries = read => if carries {
+                    if self.fresh {
+                        tracing::info!(?slot, "switch: the fresh candidate carries traffic");
+                    } else {
+                        tracing::info!(?slot, "switch: the candidate carries traffic");
+                    }
+                    break Ok(None);
+                },
             }
         };
         echo_token.cancel();
@@ -395,7 +405,7 @@ impl SwitchOps for RuntimeSwitch<'_> {
     async fn probe(&mut self, slot: Slot, cancel: &CancellationToken) -> AppResult<()> {
         let i = engine_slot(slot).index();
         let ep = self.slots.endpoints[i].clone();
-        if !self.engines.handshake_ready(&self.next.profile) {
+        if !self.engines.handshake_wait(&self.next.profile).is_zero() {
             // Lab live-7 F4: the name's budget (3 handshakes a minute, shared by servers with
             // one REALITY name) held the switch for 30 s. The proof needs no handshake of its
             // own: the select comes first and the traffic the new slot carries proves it.

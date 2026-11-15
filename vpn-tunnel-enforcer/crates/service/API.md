@@ -164,6 +164,11 @@ pub struct KeptSession { pub receipt: StartReceiptWire /* current generation, pi
 pub enum Event { Status(Box<StatusWire>), Tunnel(TunnelEventWire), Notice(Notice) }
 pub struct WireError { pub code: ErrorCode, pub kind: ErrorKind, pub msg: Msg, pub warnings: Vec<Msg> }
 pub enum ErrorCode { Busy, Version, HelloFirst, BadRequest, Refused, Failed }
+impl WireError { pub fn version(protocol: u32) -> Self;      // the Hello refusal: `service.pipe.version`
+    pub fn service_protocol(&self) -> Option<u32> }          // with arg `protocol` = the service's own
+    // (p-fix-review8: in the message's args, which every client decodes; a service before names
+    // none). The app marks the service outdated only when it names a lower protocol or none; a
+    // higher one means the app is the old side (the message says «Обновите приложение»).
 ```
 Wire mirrors convert from the runtime's types and back where the app needs them
 (`TunnelEvent`, `TunStatusKind`, `StopReceipt`, `ExitInfo`, `ProxyEndpoint`; `proto::back`:

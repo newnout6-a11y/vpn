@@ -12,47 +12,48 @@ use vpnte_tunnel::api::TunStatus;
 use vpnte_tunnel::runtime::EngineExes;
 
 /// After the app's own start-up work, which the runs must not slow down.
-const AFTER: Duration = Duration::from_secs(10);
+pub(super) const AFTER: Duration = Duration::from_secs(10);
 
-/// [`AFTER`] after the start, unless a session is up (its engines ran already), each engine runs
-/// its `version` once (`pin::first_run` logs «engine first run» with its ms). `true` = they ran.
+/// `after` the start ([`AFTER`]), unless a session is up (its engines ran already), each engine
+/// runs its `version` once (`pin::first_run` logs «engine first run» with its ms). `true` = both
+/// answered (review tunready-a4: not merely that the wait ended).
 pub(super) async fn first_runs(
     exes: watch::Receiver<EngineExes>,
     status: watch::Receiver<TunStatus>,
+    after: Duration,
     stop: CancellationToken,
 ) -> bool {
     tokio::select! {
         () = stop.cancelled() => return false,
-        () = tokio::time::sleep(AFTER) => {}
+        () = tokio::time::sleep(after) => {}
     }
     if status.borrow().running {
         return false;
     }
     let exes = exes.borrow().clone();
     let runs = async {
-        first_run(Engine::SingBox, &exes.singbox).await;
-        first_run(Engine::Xray, &exes.xray).await;
+        let singbox = first_run(Engine::SingBox, &exes.singbox).await;
+        let xray = first_run(Engine::Xray, &exes.xray).await;
+        singbox && xray
     };
     tokio::select! {
         () = stop.cancelled() => false,
-        () = runs => true,
+        ran = runs => ran,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use tokio::time::Instant;
 
     use super::*;
 
-    /// Relative paths: `first_run` refuses them without spawning anything, so paused time
-    /// never races a real process.
-    fn exes() -> watch::Receiver<EngineExes> {
+    fn exes_in(dir: &Path) -> watch::Receiver<EngineExes> {
         let exes = EngineExes {
-            singbox: PathBuf::from("sing-box.exe"),
-            xray: PathBuf::from("xray.exe"),
+            singbox: dir.join("sing-box.exe"),
+            xray: dir.join("xray.exe"),
         };
         watch::channel(exes).1
     }
@@ -66,17 +67,36 @@ mod tests {
     }
 
     /// Lab live-11 L11-5: the engines run once [`AFTER`] the start while nothing runs; a session
-    /// already up skips them; the app's end stops the wait at once.
+    /// already up skips them; the app's end stops the wait at once. Relative paths are refused
+    /// without a spawn (paused time never races a real process), and that is what it reports.
     #[tokio::test(start_paused = true)]
     async fn the_engines_run_once_after_the_start_while_idle() {
+        let relative = || exes_in(Path::new(""));
         let start = Instant::now();
         let ended = CancellationToken::new();
         ended.cancel();
-        assert!(!first_runs(exes(), status(false), ended).await);
+        assert!(!first_runs(relative(), status(false), AFTER, ended).await);
         assert_eq!(start.elapsed(), Duration::ZERO);
-        assert!(!first_runs(exes(), status(true), CancellationToken::new()).await);
+        let token = CancellationToken::new();
+        assert!(!first_runs(relative(), status(true), AFTER, token.clone()).await);
         assert_eq!(start.elapsed(), AFTER);
-        assert!(first_runs(exes(), status(false), CancellationToken::new()).await);
+        assert!(!first_runs(relative(), status(false), AFTER, token).await);
         assert_eq!(start.elapsed(), AFTER * 2);
+    }
+
+    /// Review tunready-a4: `first_runs` reports what the runs answered. The bundled engines
+    /// (absolute paths) answer; a missing one does not (skipped quietly without `resources/`).
+    #[tokio::test]
+    async fn the_first_runs_report_what_the_engines_answered() {
+        let bundled = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources"));
+        if !(bundled.join("sing-box.exe").is_file() && bundled.join("xray.exe").is_file()) {
+            return;
+        }
+        let token = CancellationToken::new();
+        let idle = || status(false);
+        let ran = first_runs(exes_in(&bundled), idle(), Duration::ZERO, token.clone()).await;
+        assert!(ran);
+        let missing = bundled.join("missing-engines");
+        assert!(!first_runs(exes_in(&missing), idle(), Duration::ZERO, token).await);
     }
 }

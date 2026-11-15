@@ -344,23 +344,38 @@ async fn a_start_that_fails_early_drops_its_inputs_snapshot() {
     assert_eq!(w.count("inputs-done"), 1, "{:?}", w.log());
 }
 
-/// Lab live-11 L11-2: an Xray-slot TUN start keeps the server its slot dials out of the TUN's
-/// routes (Xray's own dials no longer loop through sing-box); a Proxy start has no routes.
+/// Review tunready-a1/b1: an Xray-slot TUN start keeps its slots' servers inside the TUN. A route
+/// exclusion holds for every program (a CDN-fronted server's address serves other sites too, which
+/// then left the VPN) and outlived a switch; Xray's own dials leave by the engines' process rule.
 #[tokio::test]
-async fn an_xray_tun_start_keeps_its_slots_server_out_of_the_tun() {
-    let w = World::new();
-    let h = spawn(&w);
-    let req = StartRequest {
-        capture: crate::api::CaptureKind::Tun,
-        ..vpn_req(XRAY_KEY, vpnte_base::types::EnginePref::Xray)
-    };
-    h.start(req, CancellationToken::new()).await.expect("start");
-    let config = w.configs.lock()[0].clone();
-    let excluded = config["inbounds"][0]["route_exclude_address"].clone();
-    assert!(
-        excluded
-            .as_array()
-            .is_some_and(|l| l.contains(&serde_json::json!("203.0.113.10/32"))),
-        "{excluded}"
-    );
+async fn an_xray_tun_start_keeps_its_slots_servers_inside_the_tun() {
+    // An IP literal, and a CDN name the fake resolver answers with the same address.
+    for key in [XRAY_KEY, NATIVE_BY_NAME_KEY] {
+        let w = World::new();
+        let h = spawn(&w);
+        let req = StartRequest {
+            capture: crate::api::CaptureKind::Tun,
+            ..vpn_req(key, vpnte_base::types::EnginePref::Xray)
+        };
+        h.start(req, CancellationToken::new()).await.expect("start");
+        assert!(
+            w.log().iter().any(|l| l.starts_with("xray-start:")),
+            "{key}"
+        );
+        let config = w.configs.lock()[0].clone();
+        let excluded = config["inbounds"][0]["route_exclude_address"].to_string();
+        assert!(!excluded.contains("203.0.113.10"), "{key}: {excluded}");
+        let xray = |r: &serde_json::Value| {
+            r["process_path_regex"].as_array().is_some_and(|l| {
+                l.iter()
+                    .any(|p| p.as_str().is_some_and(|p| p.contains(r"xray\.exe")))
+            })
+        };
+        let engines_direct = config["route"]["rules"].as_array().is_some_and(|rules| {
+            rules
+                .iter()
+                .any(|r| r["outbound"] == vpnte_engine::tags::DIRECT_OUT && xray(r))
+        });
+        assert!(engines_direct, "{key}: {}", config["route"]["rules"]);
+    }
 }

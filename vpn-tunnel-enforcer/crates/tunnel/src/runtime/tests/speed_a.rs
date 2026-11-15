@@ -234,7 +234,7 @@ async fn a_recovery_without_a_free_slot_is_proven_by_its_traffic() {
     tokio::time::sleep(Duration::from_secs(21)).await;
     // The first kill, ~25 s after the switch: no slot until a minute after the connect.
     let server = vpnte_profiles::uri::parse_uri(XRAY_KEY_2).expect("fake key parses");
-    assert!(!gate.ready_now(&server));
+    assert!(!gate.wait_now(&server).is_zero());
     w.slot_traffic.lock()[0] = 4096;
     let before = proofs(&w);
     let took = crash_to_running(&w, &mut events, 0).await;
@@ -308,6 +308,49 @@ async fn a_fresh_connect_keeps_the_gated_echo() {
     let at = running_at(&w, &h, slot_req(CaptureKind::Proxy)).await;
     assert_eq!(proofs(&w), 1);
     assert!(at >= 60_000 + 316, "running at {at}");
+}
+
+/// Lab live-13 L13-2, the lab's own case: a fresh connect whose server name gets its next
+/// handshake slot in ~20 s keeps the gated echo (nothing goes into an unproven server) and says
+/// why it waits: the status carries the moment the slot comes while it waits, and drops it when
+/// the slot comes, while the echo still runs.
+#[tokio::test(start_paused = true)]
+async fn a_fresh_connect_publishes_its_wait_for_the_handshake_slot() {
+    let w = World::new();
+    lab_steps().on(&w);
+    let gate = Arc::new(RealGate::default());
+    *w.gate.lock() = Some(gate.clone());
+    for _ in 0..3 {
+        check_takes_a_slot(&gate).await;
+    }
+    // The checks took the name's minute at 0, 0.4 and 0.8 s: its next slot comes at 60 s.
+    tokio::time::sleep(Duration::from_millis(39_200)).await;
+    let h = TunnelHandle::spawn(budget_deps(&w));
+    let status = h.status();
+    let start = {
+        let h = h.clone();
+        tokio::spawn(async move {
+            h.start(slot_req(CaptureKind::Proxy), CancellationToken::new())
+                .await
+        })
+    };
+    // Resolve (170 ms) and slot A (370 ms) first: then the proof waits for its slot.
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    let until = status.borrow().proof_waits_until;
+    let left = until.map(|at| at - vpnte_base::types::now_ms());
+    assert!(
+        left.is_some_and(|ms| (18_000..=20_000).contains(&ms)),
+        "{left:?}"
+    );
+    assert!(!status.borrow().running);
+    // The slot comes at 60 s (19 s from here): the echo (316 ms) runs without the wait shown.
+    tokio::time::sleep(Duration::from_millis(19_100)).await;
+    assert_eq!(status.borrow().proof_waits_until, None);
+    assert!(!status.borrow().running);
+    start.await.expect("joined").expect("start");
+    assert!(status.borrow().running);
+    assert_eq!(status.borrow().proof_waits_until, None);
+    assert!(w.now_ms() >= 60_000 + 316, "running at {}", w.now_ms());
 }
 
 /// Lab live-13 L13-2: a user's connect is no background check. After a preserved stop the
@@ -559,7 +602,13 @@ async fn a_tun_start_is_running_once_the_tun_passes_packets() {
     steps.on(&w);
     w.tun_passes_ms.store(700, Ordering::SeqCst);
     let h = TunnelHandle::spawn(budget_deps(&w));
-    let at = running_at(&w, &h, slot_req(CaptureKind::Tun)).await;
+    let receipt = h
+        .start(slot_req(CaptureKind::Tun), CancellationToken::new())
+        .await
+        .expect("start");
+    assert!(h.status().borrow().running);
+    let at = w.now_ms();
+    assert!(receipt.warnings.is_empty(), "{:?}", receipt.warnings);
     tokio::task::yield_now().await;
     assert!(near(w.ms("ready"), 900), "ready at {}", w.ms("ready"));
     assert!(near(w.ms("tun-passes"), 1600), "{}", w.ms("tun-passes"));
@@ -568,7 +617,8 @@ async fn a_tun_start_is_running_once_the_tun_passes_packets() {
 }
 
 /// A TUN that never answers holds the start for the probe's bound (3 s) and then the start goes
-/// on as before: running, nothing compensated, no other effect.
+/// on: running, nothing compensated, and one calm warning in its receipt (review tunready-b2: a
+/// silence the start saw is not kept in the log only).
 #[tokio::test(start_paused = true)]
 async fn a_silent_tun_delays_the_start_by_the_bound_only() {
     let w = World::new();
@@ -582,10 +632,17 @@ async fn a_silent_tun_delays_the_start_by_the_bound_only() {
     steps.on(&w);
     w.tun_passes_ms.store(u32::MAX, Ordering::SeqCst);
     let h = TunnelHandle::spawn(budget_deps(&w));
-    let at = running_at(&w, &h, slot_req(CaptureKind::Tun)).await;
+    let receipt = h
+        .start(slot_req(CaptureKind::Tun), CancellationToken::new())
+        .await
+        .expect("start");
+    assert!(h.status().borrow().running);
+    let at = w.now_ms();
     assert!(near(at, 3900), "running at {at}");
     assert_eq!(w.count("release"), 0, "{:?}", w.log());
     assert_eq!(w.count("terminate:4100"), 0, "{:?}", w.log());
+    let slow = Msg::new("tunnel.runtime.tunSlow");
+    assert_eq!(receipt.warnings, [slow], "{:?}", receipt.warnings);
 }
 
 /// The proxy capture passes once its inbound accepts: no probe, no wait, whatever the TUN knob.

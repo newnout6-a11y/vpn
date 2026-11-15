@@ -404,6 +404,11 @@ pub enum Event {
     Notice(vpnte_base::types::Notice),
 }
 
+/// The message of a [`ErrorCode::Version`] refusal.
+const VERSION_KEY: &str = "service.pipe.version";
+/// The arg of that message naming the service's protocol ([`WireError::version`]).
+const PROTOCOL_ARG: &str = "protocol";
+
 /// Why a request failed: the user-facing message plus a machine code.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -442,6 +447,31 @@ impl WireError {
             msg: Msg::new(key),
             warnings: Vec::new(),
         }
+    }
+
+    /// The Hello refusal of a service that speaks `protocol` (more than one version apart). The
+    /// number rides in the message's args (p-fix-review8): every client reads those without
+    /// complaint (structs refuse unknown fields, a message's args are free), so an older app
+    /// learns that it is the old side and says «Обновите приложение» instead of offering to
+    /// reinstall its own older service.
+    pub fn version(protocol: u32) -> Self {
+        let mut refusal = Self::new(ErrorCode::Version, ErrorKind::Validation, VERSION_KEY);
+        refusal.msg = refusal.msg.arg(PROTOCOL_ARG, protocol);
+        refusal
+    }
+
+    /// The protocol a [`ErrorCode::Version`] refusal names (`None`: another error, or a service
+    /// before p-fix-review8, which names none).
+    pub fn service_protocol(&self) -> Option<u32> {
+        if self.code != ErrorCode::Version {
+            return None;
+        }
+        let (_, value) = self
+            .msg
+            .args
+            .iter()
+            .find(|(name, _)| name == PROTOCOL_ARG)?;
+        value.parse().ok()
     }
 
     /// The operation failed with `err`.

@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use vpnte_service::proto::{PROTOCOL, negotiate};
-use vpnte_ui::helper::{Ability, HelperApi, Lack, Service};
+use vpnte_ui::helper::{Ability, HelperApi, Service};
 
 use super::*;
 use crate::api_settings::test_support::{FakeTunnel, TempDir, backend};
@@ -102,19 +102,18 @@ fn a_service_that_refused_the_hello_is_outdated() {
         ..refused
     };
     assert_eq!(derive(missing).service, Service::Missing);
-    // What an older service lacks is still named for a service before the scope.
-    assert_eq!(lacks(SCOPE_PROTOCOL - 1), vec![Lack::AppScope]);
-    assert_eq!(lacks(SCOPE_PROTOCOL), Vec::new());
 }
 
 /// p-wire5: a version-4 service (one behind, the oldest the app still links to) lacks nothing
 /// the user would notice: without the run facts the app labels by its own fallbacks, so the
-/// page shows nothing new.
+/// page shows nothing new (p-fix-review8: the app-scope line went with protocol 3).
 #[test]
 fn a_version_4_service_lacks_nothing_the_user_would_notice() {
     assert_eq!(PROTOCOL - 1, 4);
     let cap = derive(facts(true, Some(PROTOCOL - 1), false, true));
-    assert!(cap.lacks().is_empty(), "{:?}", cap.service);
+    assert_eq!(cap.service, Service::Older);
+    assert_eq!(cap.service.pause_key(), None);
+    assert!(!cap.service.needs_update());
     assert_eq!(cap.tunnel, Ability::Service);
     assert_eq!(cap.kill_switch, Ability::Service);
 }
@@ -180,7 +179,7 @@ async fn the_view_follows_the_service() {
     fake.service.store(true, Ordering::Relaxed);
     fake.protocol.store(PROTOCOL - 1, Ordering::Relaxed);
     fake.snapshot.send_modify(|_| {});
-    let cap = until(&rx, |c| matches!(c.service, Service::Older { .. })).await;
+    let cap = until(&rx, |c| c.service == Service::Older).await;
     assert_eq!(cap.tunnel, Ability::Service);
 
     fake.losses.send_modify(|n| *n += 1);

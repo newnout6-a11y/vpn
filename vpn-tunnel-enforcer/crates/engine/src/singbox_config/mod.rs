@@ -11,7 +11,6 @@ mod dns;
 mod inbounds;
 mod outbounds;
 mod route;
-mod servers;
 mod spoof;
 
 #[cfg(test)]
@@ -21,15 +20,13 @@ mod live;
 #[cfg(test)]
 mod proxy_tests;
 #[cfg(test)]
-mod servers_tests;
-#[cfg(test)]
 mod tests;
 /// Item 18: the started config carries the TLS tricks.
 #[cfg(test)]
 mod tricks_tests;
 
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -42,7 +39,6 @@ use vpnte_profiles::emit_singbox::{
 use vpnte_profiles::model::Profile;
 
 pub use dns::{direct_dns_server, usable_physical_dns};
-pub use servers::{MAX_XRAY_SERVERS, xray_servers};
 pub use spoof::{SPOOF_KEYS, gate_spoof};
 
 use crate::slot::{Slot, SlotEndpoint};
@@ -268,19 +264,9 @@ impl From<ConfigError> for AppError {
 
 /// Builds the whole configuration (sing-box reads it from stdin).
 pub fn build(i: &ConfigInputs) -> Result<Value, ConfigError> {
-    build_with_servers(i, &[])
-}
-
-/// [`build`], with `servers` kept out of the TUN's routes besides the dialed upstream's own: the
-/// addresses an engine of the upstream dials itself ([`xray_servers`] of an Xray slot's graph).
-/// Like the slots, they are the upstream's identity and stay out of [`compat_key`]. Ignored by
-/// the proxy capture, which has no routes.
-pub fn build_with_servers(i: &ConfigInputs, servers: &[IpAddr]) -> Result<Value, ConfigError> {
     let up = outbounds::upstream(&i.upstream)?;
-    let mut exclude = up.exclude.clone();
-    exclude.extend(servers.iter().filter(|ip| !up.exclude.contains(ip)));
     let mut inbounds = vec![match &i.capture {
-        Capture::Tun(t) => inbounds::tun(t, &exclude)?,
+        Capture::Tun(t) => inbounds::tun(t, &up.exclude)?,
         Capture::Proxy { port } => inbounds::proxy(*port),
     }];
     inbounds.extend(inbounds::listeners(i)?);

@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 
-use super::{Ability, Feature, HelperApi, Lack, use_capability};
+use super::{Ability, Feature, HelperApi, use_capability};
 use crate::lang::tr;
 use crate::t;
 use crate::widgets::{Button, ButtonKind, use_job};
@@ -12,9 +12,8 @@ use crate::widgets::{Button, ButtonKind, use_job};
 /// службу-помощник.» with «Установить службу-помощник» while the service is missing;
 /// «Служба-помощник запускается…» / «… остановлена…» while the installed one is down;
 /// «Служба-помощник устарела.» with «Обновить службу-помощник» while it is too old to speak to;
-/// «В этой версии недоступно.» for what no part of this version carries; under Tunnel mode, what
-/// an older service does not do yet (it updates itself). Nothing without a helper backend in
-/// context.
+/// «В этой версии недоступно.» for what no part of this version carries. Nothing without a helper
+/// backend in context.
 #[component]
 pub fn HelperLine(feature: Feature) -> Element {
     let cap = use_capability();
@@ -29,24 +28,14 @@ pub fn HelperLine(feature: Feature) -> Element {
         Ability::Service => cap.service.pause_key().map(|key| t!(key)),
         Ability::InProcess => None,
     };
-    // What an older service lacks concerns Tunnel mode only, and only while it carries it.
-    let lacks = match (feature, ability) {
-        (Feature::Tunnel, Ability::Service) => cap.lacks().to_vec(),
-        _ => Vec::new(),
-    };
-    if text.is_none() && lacks.is_empty() {
+    let Some(text) = text else {
         return rsx! {};
-    }
+    };
     let offer = ability == Ability::NeedsService;
     let update = ability == Ability::Service && cap.service.needs_update();
     rsx! {
         div { class: "helper-line", "data-helper": feature.id(),
-            if let Some(text) = text {
-                p { class: "helper-line-text", "{text}" }
-            }
-            for lack in lacks {
-                p { class: "helper-line-text", "data-lack": lack.id(), {t!(lack_key(lack))} }
-            }
+            p { class: "helper-line-text", "{text}" }
             if offer || update {
                 InstallService { update }
             }
@@ -102,11 +91,5 @@ pub(super) const fn install_key(update: bool) -> &'static str {
         "ui.helper.update"
     } else {
         "ui.helper.install"
-    }
-}
-
-fn lack_key(lack: Lack) -> &'static str {
-    match lack {
-        Lack::AppScope => "ui.helper.older.appScope",
     }
 }

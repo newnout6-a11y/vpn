@@ -122,6 +122,37 @@ fn versions_one_apart_negotiate_down() {
     assert_eq!(negotiate(PROTOCOL, PROTOCOL), Some(PROTOCOL));
 }
 
+/// p-fix-review8: a Version refusal names the service's protocol in its message's args, which a
+/// client of any version decodes (a v3 refusal names none: `None`); other errors name none.
+#[test]
+fn a_version_refusal_names_the_services_protocol() {
+    let refusal = WireError::version(7);
+    let json = serde_json::to_string(&ServerFrame::Failed {
+        id: 1,
+        error: refusal.clone(),
+    })
+    .expect("json");
+    let ServerFrame::Failed { error, .. } =
+        frame::decode::<ServerFrame>(json.as_bytes()).expect("reads")
+    else {
+        panic!("{json}");
+    };
+    assert_eq!(error, refusal);
+    assert_eq!(error.service_protocol(), Some(7));
+    assert_eq!(error.msg.key, "service.pipe.version");
+    let v3 = WireError::new(
+        ErrorCode::Version,
+        ErrorKind::Validation,
+        "service.pipe.version",
+    );
+    assert_eq!(v3.service_protocol(), None);
+    let busy = WireError {
+        code: ErrorCode::Busy,
+        ..WireError::version(7)
+    };
+    assert_eq!(busy.service_protocol(), None);
+}
+
 /// Protocol 3 (p-smart-lists): the rule sets ride a start as an optional field; a version-2
 /// service never sees it (it refuses unknown fields), and an input without it still reads.
 #[test]

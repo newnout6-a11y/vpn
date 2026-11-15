@@ -64,11 +64,15 @@ async fn without_the_service_tunnel_mode_is_said_up_front() {
     assert!(seen.has("data-helper", "tunnel"));
 }
 
-/// Installed, or an elevated app hosting it in-process: Tunnel mode is saved as chosen and
-/// nothing is said; an older service says what it does not do yet, without an install.
+/// Installed (also one protocol version older), or an elevated app hosting it in-process: Tunnel
+/// mode is saved as chosen and nothing is said.
 #[tokio::test]
 async fn where_tunnel_mode_runs_it_is_saved_as_chosen() {
-    for helper in [HelperScene::Installed, HelperScene::Elevated] {
+    for helper in [
+        HelperScene::Installed,
+        HelperScene::Older,
+        HelperScene::Elevated,
+    ] {
         for at in [Step::Routing, Step::Done] {
             let (dom, seen) = step(at, helper).await;
             assert!(!seen.has("data-helper", "tunnel"), "{helper:?} {at:?}");
@@ -79,10 +83,5 @@ async fn where_tunnel_mode_runs_it_is_saved_as_chosen() {
             seen.shows(&text(&dom, "ui.wizard.routing.hard")),
             "{helper:?}"
         );
-    }
-    for at in [Step::Routing, Step::Done] {
-        let (dom, seen) = step(at, HelperScene::Older).await;
-        assert!(seen.has("data-lack", "app-scope"), "{at:?}");
-        assert!(!seen.shows(&text(&dom, "ui.helper.install")), "{at:?}");
     }
 }

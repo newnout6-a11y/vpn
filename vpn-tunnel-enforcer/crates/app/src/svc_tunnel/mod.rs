@@ -162,6 +162,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
     tokio::spawn(first_run::first_runs(
         exes.subscribe(),
         status.clone(),
+        first_run::AFTER,
         b.shutdown.child_token(),
     ));
 

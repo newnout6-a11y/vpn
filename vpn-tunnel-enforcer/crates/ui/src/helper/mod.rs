@@ -21,7 +21,7 @@ mod strip;
 mod tests;
 mod view;
 
-pub use model::{Ability, Capability, Feature, Lack, Service};
+pub use model::{Ability, Capability, Feature, Service};
 pub use strip::TunnelStrip;
 pub use view::{HelperLine, InstallService};
 

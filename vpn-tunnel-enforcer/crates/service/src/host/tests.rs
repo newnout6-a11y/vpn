@@ -460,10 +460,14 @@ async fn hello_comes_first_and_versions_must_be_close() {
         protocol: crate::proto::PROTOCOL + 2,
         app_version: "9.0.0".into(),
     });
-    assert_eq!(
-        code(c.call(far).await.expect_err("too new")),
-        ErrorCode::Version
-    );
+    let refused = c.call(far).await.expect_err("too new");
+    // p-fix-review8: the refusal names this service's protocol (the app then knows its side).
+    let CallError::Service(refusal) = refused else {
+        panic!("pipe error: {refused:?}");
+    };
+    assert_eq!(refusal.code, ErrorCode::Version);
+    assert_eq!(refusal.service_protocol(), Some(crate::proto::PROTOCOL));
+    assert_eq!(refusal.msg.key, "service.pipe.version");
 }
 
 /// Owner question 23: a connection that drops without a stop (the app window crashed) leaves the

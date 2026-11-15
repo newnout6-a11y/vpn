@@ -264,6 +264,7 @@ impl Hub {
                     no_pause_vpn: kill_switch.foreign_vpn.clone(),
                     proxy_taken: *w.proxy_taken.borrow(),
                     proving_exit: project::proving_exit(&snap, &status),
+                    proof_waits_until: project::proof_waits_until(&snap, &status),
                     same_exit,
                 }
             }

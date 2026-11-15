@@ -8,8 +8,9 @@ pub enum Service {
     Missing,
     /// Installed and as new as the app (or its version is not known yet: no link so far).
     Installed,
-    /// Installed but older than the app: what it does not do yet. It updates itself.
-    Older { lacks: Vec<Lack> },
+    /// Installed and one protocol version older than the app (the oldest it links to): it
+    /// carries everything as it is (the app labels by its own fallbacks) and updates itself.
+    Older,
     /// Installed and Windows is starting it (after a restart): its pipe answers in a moment.
     Starting,
     /// Installed but stopped: Tunnel mode waits for it, Proxy mode works without it.
@@ -28,7 +29,7 @@ impl Service {
             Self::Starting => Some("ui.helper.starting"),
             Self::Stopped => Some("ui.helper.stopped"),
             Self::Outdated => Some("ui.helper.outdated"),
-            Self::Missing | Self::Installed | Self::Older { .. } => None,
+            Self::Missing | Self::Installed | Self::Older => None,
         }
     }
 
@@ -36,13 +37,6 @@ impl Service {
     pub const fn needs_update(&self) -> bool {
         matches!(self, Self::Outdated)
     }
-}
-
-/// What an older helper service does not do yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lack {
-    /// «Только выбранные приложения» in Tunnel mode: it routes every app through the VPN.
-    AppScope,
 }
 
 /// How a privileged feature runs here.
@@ -102,18 +96,6 @@ impl Capability {
             Feature::Capture => self.capture,
         }
     }
-
-    /// What the installed service does not do yet (empty unless it is older than the app).
-    pub fn lacks(&self) -> &[Lack] {
-        match &self.service {
-            Service::Older { lacks } => lacks,
-            Service::Missing
-            | Service::Installed
-            | Service::Starting
-            | Service::Stopped
-            | Service::Outdated => &[],
-        }
-    }
 }
 
 impl Feature {
@@ -124,15 +106,6 @@ impl Feature {
             Self::KillSwitch => "kill-switch",
             Self::Policies => "policies",
             Self::Capture => "capture",
-        }
-    }
-}
-
-impl Lack {
-    /// Stable id for markup and tests.
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::AppScope => "app-scope",
         }
     }
 }

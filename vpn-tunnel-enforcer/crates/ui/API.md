@@ -305,6 +305,10 @@ pub struct DashboardView {
     pub no_pause_vpn: Option<String>,                 // ks-a: another VPN carries all traffic: no pause
     pub proxy_taken: bool,                            // ks-b: another program took the system proxy: one line + «Вернуть»
     pub proving_exit: bool,                           // p-live2: a connect proves its exit: caption «Проверяем выход…»
+    pub proof_waits_until: Option<UnixMs>,            // L13-2: its proof waits for the server's handshake
+                                                      // slot until then: the caption goes on «сервер примет
+                                                      // новое соединение через N с» (ticks each second,
+                                                      // outside the live region; `ui.dashboard.provingSlot`)
     pub same_exit: SameExit,                          // exit == the address without us, explained: one calm line
                                                       // `SameExit::key()` (never the leak card)
 }
@@ -985,7 +989,8 @@ pub trait HelperApi: 'static {      // context Rc<dyn HelperApi>; absent (demos,
     async fn install_service(&self) -> AppResult<bool>;   // Windows' one prompt; Ok(false) = declined
 }
 pub struct Capability { service: Service, elevated: bool, tunnel, kill_switch, policies, capture: Ability }
-pub enum Service { Missing, Installed, Older { lacks: Vec<Lack> }, Starting, Stopped, Outdated }   pub enum Lack { AppScope }
+pub enum Service { Missing, Installed, Older, Starting, Stopped, Outdated }  // Older: one protocol back,
+    // carries everything as it is (no line; the app-scope `Lack` went with protocol 3, p-fix-review8)
 impl Service { pub const fn pause_key(&self) -> Option<&'static str> }  // p-live2: Starting / Stopped ->
     // `ui.helper.{starting,stopped}`: HelperLine (a feature the service carries), TunnelStrip, the tray;
     // Outdated (wire5-a1: it refused the app's Hello) -> `ui.helper.outdated`
@@ -1000,8 +1005,7 @@ pub fn use_capability() -> Option<Capability>;          // live; None without a 
 ```
 `HelperLine`: nothing while the feature works; `NeedsService`: «… работает через
 службу-помощник.» with «Установить службу-помощник»; `NotInVersion`: «В этой версии недоступно.»
-(no install: installing does not help); under Tunnel mode an older service's `lacks` (it updates
-itself). Muted text, no colour of its own, no dialog (`assets/css/pages/helper.css`). Used by
+(no install: installing does not help). Muted text, no colour of its own, no dialog (`assets/css/pages/helper.css`). Used by
 Settings (Подключение, Kill switch: «Всегда» needs no note of its own and the exceptions are
 read-only without WFP; browser policies: no buttons where nothing can write them; capture greyed
 out), the wizard (routing step; the summary shows what «Завершить» saves: Proxy while Tunnel mode

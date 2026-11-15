@@ -125,6 +125,14 @@ pub(super) fn proving_exit(snap: &TunnelSnapshot, status: &TunStatus) -> bool {
         && !status.running
 }
 
+/// While a connect proves its exit, the moment its proof gets the server's handshake slot (lab
+/// live-13 L13-2: the start page counts down to it instead of a bare «Проверяем выход…»).
+pub(super) fn proof_waits_until(snap: &TunnelSnapshot, status: &TunStatus) -> Option<UnixMs> {
+    status
+        .proof_waits_until
+        .filter(|_| proving_exit(snap, status))
+}
+
 /// Settled off: no session, nothing in flight (the IP monitor then keeps only stale samples).
 pub(super) fn settled_off(snap: &TunnelSnapshot) -> bool {
     snap.state == fsm::TunnelState::Disconnected && snap.transition.is_none()

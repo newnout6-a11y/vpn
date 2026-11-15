@@ -61,12 +61,24 @@ enum Turn {
     Join(watch::Receiver<Outcome>),
 }
 
-/// The addresses `owner`'s ahead lookup of `name` in flight brings, once it lands (`None`: none
-/// runs, it found nothing, or it was dropped).
-pub(super) async fn join(owner: Option<&str>, name: &str) -> Option<Vec<IpAddr>> {
-    let key = (owner?.to_owned(), name.to_owned());
-    let running = FLIGHT.lock().as_ref()?.get(&key)?.clone();
-    outcome(running).await
+/// What `memory` holds for `name` (kept or recent answers), else what `owner`'s ahead lookup of
+/// it in flight brings once it lands (`None`: none runs, it found nothing, or it was dropped).
+/// The flight is read first: a lookup remembers its answer before it leaves the flight, so one
+/// that lands between the two reads is found either way (review tunready-a3: memory first missed
+/// it on the app's multi-thread runtime and asked the resolvers a second time).
+pub(super) async fn recall(
+    owner: Option<&str>,
+    name: &str,
+    memory: impl FnOnce() -> Option<Vec<IpAddr>>,
+) -> Option<Vec<IpAddr>> {
+    let running = owner.and_then(|owner| {
+        let key = (owner.to_owned(), name.to_owned());
+        FLIGHT.lock().as_ref()?.get(&key).cloned()
+    });
+    if let Some(addrs) = memory() {
+        return Some(addrs);
+    }
+    outcome(running?).await
 }
 
 async fn outcome(mut running: watch::Receiver<Outcome>) -> Option<Vec<IpAddr>> {
@@ -124,14 +136,18 @@ mod tests {
         );
         let joined = async {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            join(owner.as_deref(), "join.example").await
+            recall(owner.as_deref(), "join.example", || None).await
         };
-        let other = join(Some("S-1-5-21-other"), "join.example");
+        let other = recall(Some("S-1-5-21-other"), "join.example", || None);
         let (a, b, c, d) = tokio::join!(first, second, joined, other);
         assert_eq!((a.unwrap(), b.unwrap()), (vec![ip(7)], vec![ip(7)]));
         assert_eq!((c, d), (Some(vec![ip(7)]), None));
         assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(join(owner.as_deref(), "join.example").await, None, "landed");
+        assert_eq!(
+            recall(owner.as_deref(), "join.example", || None).await,
+            None,
+            "landed"
+        );
     }
 
     /// A dropped lookup leaves its joiners nothing to wait for.
@@ -149,10 +165,31 @@ mod tests {
         );
         let joined = async {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            join(owner.as_deref(), "drop.example").await
+            recall(owner.as_deref(), "drop.example", || None).await
         };
         let (gone, seen) = tokio::join!(dropped, joined);
         assert!(gone.is_err());
         assert_eq!(seen, None);
+    }
+
+    /// Review tunready-a3: a lookup that lands while the asker reads its memory (it remembers,
+    /// answers, then leaves the flight) is found, because the flight was read first.
+    #[tokio::test]
+    async fn a_lookup_landing_during_the_memory_read_is_found() {
+        let owner = "S-1-5-21-between";
+        let key = (owner.to_owned(), "between.example".to_owned());
+        let (tx, rx) = watch::channel(None);
+        FLIGHT
+            .lock()
+            .get_or_insert_default()
+            .insert(key.clone(), rx);
+        // The memory read misses; meanwhile the lookup lands and leaves the flight.
+        let memory = || {
+            tx.send_replace(Some(Some(vec![ip(10)])));
+            drop(Landed(key));
+            None
+        };
+        let found = recall(Some(owner), "between.example", memory).await;
+        assert_eq!(found, Some(vec![ip(10)]));
     }
 }

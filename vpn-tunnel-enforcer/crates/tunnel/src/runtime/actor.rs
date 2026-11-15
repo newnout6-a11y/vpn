@@ -367,6 +367,11 @@ impl Actor {
         self.status.send_modify(f);
     }
 
+    /// The status watch, for a field set and cleared across awaits (`slot_wait::shown`).
+    pub(super) fn status_sender(&self) -> &watch::Sender<TunStatus> {
+        &self.status
+    }
+
     /// The status as last published.
     pub(super) fn status_now(&self) -> watch::Ref<'_, TunStatus> {
         self.status.borrow()

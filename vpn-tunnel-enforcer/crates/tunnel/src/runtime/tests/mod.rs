@@ -33,7 +33,7 @@ use vpnte_profiles::model::Profile;
 
 use super::capture::{
     Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts, PassProbe, ProxyCapture,
-    model_probe, tun_config, tun_config_excluding, tun_form,
+    model_probe, tun_config, tun_form,
 };
 use super::engines::{CoreProc, EchoFailure, Engines, HandshakeGate, Slots, echo_failed};
 use super::{InputsSource, RuntimeDeps, Timings, UserInputs};
@@ -89,6 +89,8 @@ pub struct World {
     /// readiness, sing-box up to «started», the capture's readiness after it, the tunnel's own
     /// echo (S3-00; 0 = at once).
     pub resolve_ms: AtomicU32,
+    /// How long one read of a slot's downloads (the Clash `/connections` snapshot) takes.
+    pub downloads_ms: AtomicU32,
     pub slot_ready_ms: AtomicU32,
     pub core_ready_ms: AtomicU32,
     pub capture_ready_ms: AtomicU32,
@@ -98,7 +100,7 @@ pub struct World {
     pub tun_passes_ms: AtomicU32,
     passes_at: Mutex<Option<tokio::time::Instant>>,
     /// The handshake gate every exit proof through a slot passes first ([`RealGate`] replays
-    /// the app's budget); `None`: `budget_spent` alone answers `handshake_ready`.
+    /// the app's budget); `None`: `budget_spent` alone answers `handshake_wait`.
     pub gate: Mutex<Option<Arc<dyn HandshakeGate>>>,
     /// What the client sent about the next operation's server (H2: `fresh`, `hints`), handed
     /// out once like the helper service's inputs do.
@@ -180,6 +182,7 @@ impl World {
             stamps: Mutex::new(Vec::new()),
             epoch: tokio::time::Instant::now(),
             resolve_ms: AtomicU32::new(0),
+            downloads_ms: AtomicU32::new(0),
             slot_ready_ms: AtomicU32::new(0),
             core_ready_ms: AtomicU32::new(0),
             capture_ready_ms: AtomicU32::new(0),
@@ -511,14 +514,16 @@ impl Engines for FakeEngines {
         _c: &ClashEndpoint,
         slot: Slot,
     ) -> AppResult<Vec<(String, u64)>> {
+        self.0.take(&self.0.downloads_ms).await;
         let down = self.0.slot_traffic.lock()[slot.index()];
         Ok(vec![(format!("conn-{}", slot.index()), down)])
     }
-    fn handshake_ready(&self, server: &Profile) -> bool {
+    fn handshake_wait(&self, server: &Profile) -> Duration {
         let gate = self.0.gate.lock().clone();
         match gate {
-            Some(gate) => gate.ready_now(server),
-            None => !self.0.budget_spent.load(Ordering::SeqCst),
+            Some(gate) => gate.wait_now(server),
+            None if self.0.budget_spent.load(Ordering::SeqCst) => vpnte_probes::discipline::WINDOW,
+            None => Duration::ZERO,
         }
     }
     async fn resolve(
@@ -677,14 +682,6 @@ impl Capture for FakeCapture {
         parts: &EngineParts,
     ) -> Result<(Value, [u8; 32]), ConfigError> {
         tun_config(plan, parts)
-    }
-    fn config_excluding(
-        &self,
-        plan: &CapturePlan,
-        parts: &EngineParts,
-        servers: &[IpAddr],
-    ) -> Result<(Value, [u8; 32]), ConfigError> {
-        tun_config_excluding(plan, parts, servers)
     }
     async fn begin(&self, _plan: &CapturePlan, programs: &[PathBuf]) -> AppResult<()> {
         self.0.note(format!("begin:{}", programs.len()));
@@ -891,8 +888,9 @@ impl HandshakeGate for RealGate {
         self.0.acquire(&endpoint, wait, cancel).await?;
         Ok(())
     }
-    fn ready_now(&self, server: &Profile) -> bool {
-        vpnte_probes::discipline::Endpoint::of(server).is_none_or(|e| self.0.wait_for(&e).is_zero())
+    fn wait_now(&self, server: &Profile) -> Duration {
+        vpnte_probes::discipline::Endpoint::of(server)
+            .map_or(Duration::ZERO, |e| self.0.wait_for(&e))
     }
 }
 

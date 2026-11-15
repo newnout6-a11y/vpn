@@ -416,6 +416,7 @@ pub fn owned_by(owner: impl Fn() -> Option<String> + Send + Sync + 'static); // 
 pub fn forget(owner: &str);                          // «Забыть меня»: that user's recent names go (H3);
                                                      // his running session's are nobody's (speed3-a3)
 pub fn drop_names(names: &[String]);                 // a failed start: kept / recent answers go
+                                                     // (names matched parsed, any case: tunready-a2)
 pub fn remember(name: &str, addrs: Vec<IpAddr>);     // an answer of the lookup ahead, as recent
 pub fn remembers(name: &str) -> bool;                // a recent answer would be used now
 pub async fn resolve_ahead(name: &str) -> Result<Vec<IpAddr>, ResolveError>; // foreign IP-literal DoH only

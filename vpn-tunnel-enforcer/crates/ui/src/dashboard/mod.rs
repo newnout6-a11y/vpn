@@ -77,6 +77,9 @@ pub struct DashboardView {
     /// The connect in flight is proving its exit (its engine runs, nothing is claimed yet):
     /// the caption says «Проверяем выход…» (lab F-4).
     pub proving_exit: bool,
+    /// While proving, the proof waits for the server's handshake slot until then: the caption
+    /// counts down to it (lab live-13 L13-2).
+    pub proof_waits_until: Option<UnixMs>,
     /// The exit equals the address without our VPN and that is explained, not a leak: one calm
     /// line instead of the leak banner (the address check proves nothing then).
     pub same_exit: SameExit,

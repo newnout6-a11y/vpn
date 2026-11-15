@@ -132,7 +132,11 @@ pub(super) async fn run(
 async fn refuse(pipe: NamedPipeServer, id: u64, code: ErrorCode) {
     let key = match code {
         ErrorCode::Busy => "service.pipe.busy",
-        ErrorCode::Version => "service.pipe.version",
+        // Names this service's protocol: an older app knows that it is the old side.
+        ErrorCode::Version => {
+            let error = WireError::version(PROTOCOL);
+            return answer_and_close(pipe, &ServerFrame::Failed { id, error }).await;
+        }
         ErrorCode::HelloFirst => "service.pipe.helloFirst",
         _ => "service.pipe.badRequest",
     };

@@ -45,6 +45,11 @@ pub struct TunStatus {
     /// own traffic, a helper service before protocol 5).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proven_exit: Option<std::net::IpAddr>,
+    /// A connect's exit proof waits for the server name's handshake slot until then (lab live-13
+    /// L13-2: the RU discipline, the budget's own «retry in N s»); cleared when the slot comes or
+    /// the proof ends. `None`: it does not wait.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof_waits_until: Option<UnixMs>,
 }
 
 impl Default for TunStatus {
@@ -67,6 +72,7 @@ impl Default for TunStatus {
             session: None,
             listed_only: None,
             proven_exit: None,
+            proof_waits_until: None,
         }
     }
 }

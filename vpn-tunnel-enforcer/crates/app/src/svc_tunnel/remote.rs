@@ -25,8 +25,8 @@ use vpnte_core::store::Store;
 use vpnte_probes::leak::SelfTestResult;
 use vpnte_service::pipe::client::{CallError, Client, Frames, Incoming, Requests, ServerCheck};
 use vpnte_service::proto::{
-    ErrorCode, Event, KeptSession, KillSwitchStateWire, Reply, Request, RuleSetsWire, StatusReply,
-    StatusWire, TunnelEventWire, WireError,
+    ErrorCode, Event, KeptSession, KillSwitchStateWire, PROTOCOL, Reply, Request, RuleSetsWire,
+    StatusReply, StatusWire, TunnelEventWire, WireError,
 };
 use vpnte_tunnel::api::{ExitInfo, TunError, TunStatus, TunStatusKind, TunWarning, TunnelEvent};
 use vpnte_tunnel::runtime::InputsSource;
@@ -171,18 +171,27 @@ fn truthful(err: AppError, presence: Presence) -> AppError {
     }
 }
 
-/// The service refused the Hello for its version. Review wire5-a1: the service is the old side.
-/// Only an app's own installer or its update puts the service on the PC, so with one app on it
-/// the service is never the newer one; an update the user declined leaves it two versions back.
+/// The service refused the Hello for its version and is the old side (review wire5-a1): its
+/// refusal names a protocol below this app's, or none (a service before p-fix-review8; then only
+/// this app's own installer or update can have put it on the PC, so it is the older one). A
+/// newer service (another Windows user's newer app updated it) names a higher protocol: this app
+/// is the old side, and the service's own message says «Обновите приложение».
 fn too_old<T>(hello: &Result<T, CallError>) -> bool {
-    matches!(hello, Err(CallError::Service(w)) if w.code == ErrorCode::Version)
+    matches!(hello, Err(CallError::Service(w)) if old_service(w))
 }
 
-/// A refused Hello says what helps: the service's update (the connect said to update the app,
-/// which is already the newer side).
+fn old_service(refusal: &WireError) -> bool {
+    refusal.code == ErrorCode::Version
+        && refusal
+            .service_protocol()
+            .is_none_or(|theirs| theirs < PROTOCOL)
+}
+
+/// A Hello refused by an older service says what helps: the service's update (its own message
+/// says to update the app, which is the newer side then).
 fn outdated(err: CallError) -> CallError {
     match err {
-        CallError::Service(w) if w.code == ErrorCode::Version => CallError::Pipe(AppError::msg(
+        CallError::Service(w) if old_service(&w) => CallError::Pipe(AppError::msg(
             ErrorKind::Validation,
             Msg::new("app.service.outdated"),
         )),

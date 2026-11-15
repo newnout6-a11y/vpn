@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use vpnte_base::AppResult;
 
-use super::{Ability, Capability, HelperApi, Lack, Service};
+use super::{Ability, Capability, HelperApi, Service};
 
 /// The situation a demo starts in: the part after `+` of its `--scene` (see [`split_scene`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,7 +14,7 @@ pub enum HelperScene {
     Installed,
     /// No service (the prompt was declined): proxy mode, the install is offered.
     Missing,
-    /// An older service: Tunnel mode routes every app until it updates itself.
+    /// A service one protocol version older: it carries everything as it is and updates itself.
     Older,
     /// A service too old to speak to: Tunnel mode waits for its update.
     Outdated,
@@ -41,13 +41,7 @@ impl HelperScene {
         let (service, elevated, privileged) = match self {
             Self::Installed => (Service::Installed, false, Ability::Service),
             Self::Missing => (Service::Missing, false, Ability::NeedsService),
-            Self::Older => (
-                Service::Older {
-                    lacks: vec![Lack::AppScope],
-                },
-                false,
-                Ability::Service,
-            ),
+            Self::Older => (Service::Older, false, Ability::Service),
             Self::Outdated => (Service::Outdated, false, Ability::Service),
             Self::Elevated => (Service::Missing, true, Ability::InProcess),
         };

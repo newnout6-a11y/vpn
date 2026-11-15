@@ -4,7 +4,6 @@
 //! crash (`lost`), a preserved stop and the paused "kill switch active" state keep the block, so
 //! the watchdog keeps re-applying it after a BFE restart (review service-a6); the runtime's status
 //! reads idle in exactly those states and is no gauge.
-use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -132,15 +131,6 @@ impl<C: Capture> Capture for Engaged<C> {
 
     fn compat(&self, plan: &CapturePlan, parts: &EngineParts) -> Result<[u8; 32], ConfigError> {
         self.inner.compat(plan, parts)
-    }
-
-    fn config_excluding(
-        &self,
-        plan: &CapturePlan,
-        parts: &EngineParts,
-        servers: &[IpAddr],
-    ) -> Result<(Value, [u8; 32]), ConfigError> {
-        self.inner.config_excluding(plan, parts, servers)
     }
 
     fn guard(&self, plan: &CapturePlan) -> KillSwitchLevel {
