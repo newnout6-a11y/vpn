@@ -4,6 +4,7 @@
 //! crash (`lost`), a preserved stop and the paused "kill switch active" state keep the block, so
 //! the watchdog keeps re-applying it after a BFE restart (review service-a6); the runtime's status
 //! reads idle in exactly those states and is no gauge.
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -12,10 +13,11 @@ use serde_json::Value;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::AppResult;
+use vpnte_base::types::KillSwitchLevel;
 use vpnte_engine::singbox_config::ConfigError;
 use vpnte_tunnel::api::StartRequest;
 use vpnte_tunnel::runtime::{
-    Capture, CaptureCheck, CapturePlan, CaptureProof, EngineExes, EngineParts,
+    Capture, CaptureCheck, CapturePlan, CaptureProof, EngineExes, EngineParts, PassProbe,
 };
 
 /// A capture that records whether its protection holds a session's filters.
@@ -121,6 +123,36 @@ impl<C: Capture> Capture for Engaged<C> {
 
     async fn check(&self, proof: &CaptureProof) -> CaptureCheck {
         self.inner.check(proof).await
+    }
+
+    // Every method with a default in the trait is forwarded too: a default here silently replaces
+    // the TUN capture's own answer (lab live-12: the probe of L11-1 and the server exclusions of
+    // L11-2 never ran in Tunnel mode, and the crash policy read the level from the start instead of
+    // the live one, fix-ks a1). The test `the_wrapper_forwards_every_capture_method` pins it.
+
+    fn compat(&self, plan: &CapturePlan, parts: &EngineParts) -> Result<[u8; 32], ConfigError> {
+        self.inner.compat(plan, parts)
+    }
+
+    fn config_excluding(
+        &self,
+        plan: &CapturePlan,
+        parts: &EngineParts,
+        servers: &[IpAddr],
+    ) -> Result<(Value, [u8; 32]), ConfigError> {
+        self.inner.config_excluding(plan, parts, servers)
+    }
+
+    fn guard(&self, plan: &CapturePlan) -> KillSwitchLevel {
+        self.inner.guard(plan)
+    }
+
+    fn ports(&self, plan: &CapturePlan) -> Vec<u16> {
+        self.inner.ports(plan)
+    }
+
+    fn probe(&self) -> Option<PassProbe> {
+        self.inner.probe()
     }
 }
 

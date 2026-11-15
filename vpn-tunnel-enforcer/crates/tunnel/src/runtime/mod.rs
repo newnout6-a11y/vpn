@@ -44,8 +44,8 @@ mod watchdog;
 pub(crate) mod tests;
 
 pub use capture::{
-    Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts, ProxyCapture, TunCapture,
-    TunForm, tun_form,
+    Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts, PassProbe, ProxyCapture,
+    TunCapture, TunForm, tun_form,
 };
 pub use engines::{
     CoreProc, EngineExes, EngineFeed, EngineStarts, Engines, HandshakeGate, RealEngines, Slots,

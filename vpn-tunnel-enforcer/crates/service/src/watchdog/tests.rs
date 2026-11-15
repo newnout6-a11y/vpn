@@ -152,3 +152,101 @@ async fn a_session_permits_the_engines_it_starts() {
         .expect("begin");
     assert_eq!(*engaged.inner.programs.lock(), vec![owner, downloaded]);
 }
+
+/// A capture whose methods with a trait default all answer something the default would not.
+struct Answers;
+
+#[async_trait]
+impl Capture for Answers {
+    async fn prepare(&self, _: &StartRequest, _: &[String]) -> AppResult<CapturePlan> {
+        unreachable!("not asked")
+    }
+    fn config(&self, _: &CapturePlan, _: &EngineParts) -> Result<(Value, [u8; 32]), ConfigError> {
+        unreachable!("not asked")
+    }
+    async fn begin(&self, _: &CapturePlan, _: &[PathBuf]) -> AppResult<()> {
+        unreachable!("not asked")
+    }
+    async fn ready(
+        &self,
+        _: &CapturePlan,
+        _: Duration,
+        _: &CancellationToken,
+    ) -> AppResult<CaptureProof> {
+        unreachable!("not asked")
+    }
+    async fn routes_ok(&self, _: &CaptureProof) -> bool {
+        unreachable!("not asked")
+    }
+    async fn lost(&self) -> AppResult<()> {
+        unreachable!("not asked")
+    }
+    async fn release(&self) -> AppResult<()> {
+        unreachable!("not asked")
+    }
+    async fn wait_gone(&self, _: &CapturePlan, _: Duration, _: &CancellationToken) -> bool {
+        unreachable!("not asked")
+    }
+    async fn check(&self, _: &CaptureProof) -> CaptureCheck {
+        unreachable!("not asked")
+    }
+    fn guard(&self, _: &CapturePlan) -> KillSwitchLevel {
+        KillSwitchLevel::Strict
+    }
+    fn ports(&self, _: &CapturePlan) -> Vec<u16> {
+        vec![4242]
+    }
+    fn probe(&self) -> Option<PassProbe> {
+        Some(Box::pin(async { true }))
+    }
+}
+
+/// Lab live-12: the wrapper left the trait's defaults in place, so in Tunnel mode the TUN's own
+/// answers never reached the runtime: no packet probe before «Подключено» (L11-1), no server
+/// exclusions (L11-2), the crash policy on the start's level instead of the live one (fix-ks a1).
+#[tokio::test]
+async fn the_wrapper_answers_with_the_inner_capture() {
+    let engaged = Engaged::new(Answers);
+    let plan = plan();
+    assert_eq!(
+        engaged.guard(&plan),
+        KillSwitchLevel::Strict,
+        "the live level"
+    );
+    assert_eq!(engaged.ports(&plan), vec![4242]);
+    let probe = engaged.probe().expect("the inner capture's probe");
+    assert!(probe.await);
+}
+
+/// The names of the `fn`s inside the block that starts at `head`, up to its closing line. CI's
+/// Windows checkout has CRLF line ends (core.autocrlf): read as LF.
+fn methods(source: &str, head: &str) -> Vec<String> {
+    let source = source.replace("\r\n", "\n");
+    let start = source.find(head).expect("block head");
+    let body = &source[start..];
+    let end = body.find("\n}\n").expect("block end");
+    body[..end]
+        .split("fn ")
+        .skip(1)
+        .filter_map(|rest| {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            (!name.is_empty()).then_some(name)
+        })
+        .collect()
+}
+
+/// Every method of `Capture`, including the ones a later change adds with a default, is
+/// implemented by the wrapper: a default there answers for the TUN capture without a word.
+#[test]
+fn the_wrapper_implements_every_capture_method() {
+    let trait_source = include_str!("../../../tunnel/src/runtime/capture/mod.rs");
+    let wrapper_source = include_str!("../watchdog.rs");
+    let wanted = methods(trait_source, "pub trait Capture: Send + Sync {");
+    let wrapped = methods(wrapper_source, "impl<C: Capture> Capture for Engaged<C> {");
+    assert!(wanted.len() >= 14, "the trait was read: {wanted:?}");
+    let missing: Vec<_> = wanted.iter().filter(|m| !wrapped.contains(m)).collect();
+    assert!(missing.is_empty(), "Engaged does not forward {missing:?}");
+}
