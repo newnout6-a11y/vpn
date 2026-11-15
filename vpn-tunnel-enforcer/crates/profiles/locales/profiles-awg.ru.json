@@ -1,0 +1,26 @@
+{
+  "profiles": {
+    "awg": {
+      "invalid": "Эти параметры AmneziaWG не могут работать: {{fields}}. Сверьте их с конфигурацией сервера.",
+      "noEngine": "AmneziaWG {{generation}}: sing-box и Xray его не запускают. Нужен движок mihomo — лабораторная функция, которую эта сборка не запускает."
+    },
+    "caps": {
+      "skip": {
+        "unsupportedProtocol": "{{protocol}} в приложении не поддерживается"
+      }
+    },
+    "emit": {
+      "amneziawg": "AmneziaWG нельзя запустить на sing-box или Xray: нужен движок mihomo — лабораторная функция, которую эта сборка не запускает."
+    },
+    "export": {
+      "sharedAsConf": "Ссылка не может передать ключ AmneziaWG, поэтому он выгружен файлом .conf (его импортируют AmneziaVPN и AmneziaWG)."
+    },
+    "deeplink": {
+      "amneziaDamaged": "Ключ AmneziaVPN (vpn://) повреждён: он не декодируется.",
+      "amneziaUnsupported": "Ключ AmneziaVPN (vpn://) содержит {{protocol}} — этот протокол приложение не поддерживает."
+    },
+    "import": {
+      "naivePinNotEnforced": "Ключ закрепляет открытый ключ сервера, но NaiveProxy не умеет проверять закрепление: сертификат по-прежнему проверяется по доверенным центрам сертификации."
+    }
+  }
+}

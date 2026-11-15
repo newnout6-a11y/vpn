@@ -1,0 +1,47 @@
+[package]
+name = "vpnte-service"
+description = "Helper service: runs the privileged half of the tunnel (TUN, engines, WFP) as LocalSystem behind a named pipe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+hex.workspace = true
+ipnet.workspace = true
+parking_lot.workspace = true
+regex.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+vpnte-base.workspace = true
+# p-logs: the service log in the app log's format (redaction, rotation, tail).
+vpnte-core.workspace = true
+vpnte-engine.workspace = true
+# The leak self-test the service runs while the kill switch holds a session (p-svc-recheck).
+vpnte-probes.workspace = true
+vpnte-profiles.workspace = true
+vpnte-tunnel.workspace = true
+# p-svc-update: the signed feed, the downloader and the engine store (one key set with the app).
+vpnte-update.workspace = true
+vpnte-winnet.workspace = true
+windows = { workspace = true, features = ["Win32_System_Services"] }
+
+[dev-dependencies]
+# p-svc-update: signs test feeds with throw-away keys (the service itself only verifies).
+minisign = "0.10.0"
+# p-svc-update: test engine archives.
+zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# p-svc-fix: the updater's tests run a day of paused time (no schedule of its own).
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,24 @@
+{
+  "app": {
+    "journal": {
+      "update": {
+        "offered": "Доступна версия {{version}}",
+        "downloaded": "Скачано: {{what}}",
+        "started": "Запущена установка версии {{version}}",
+        "failed": "Не удалось обновить до версии {{version}}",
+        "notFinished": "Обновление до версии {{version}} не завершилось",
+        "engine": "{{name}}: теперь версия {{version}}",
+        "engineFailed": "{{name}} {{version}} не установлен",
+        "service": "Служба-помощник обновлена до версии {{version}}",
+        "serviceBack": "Служба-помощник вернулась к версии {{version}}"
+      },
+      "killSwitch": {
+        "off": "Kill switch выключен",
+        "onDrop": "Kill switch: «При обрыве»",
+        "always": "Kill switch: «Всегда»",
+        "exceptionAdded": "Исключение kill switch добавлено: {{label}}",
+        "exceptionRemoved": "Исключение kill switch удалено: {{label}}"
+      }
+    }
+  }
+}

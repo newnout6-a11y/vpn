@@ -45,7 +45,7 @@ const errors = []
 page.on('console', (m) => { if (['error', 'warning'].includes(m.type())) errors.push(`[${m.type()}] ${m.text()}`) })
 page.on('pageerror', (e) => errors.push(`[pageerror] ${e.message}`))
 page.on('requestfailed', (r) => errors.push(`[reqfail] ${r.url()}`))
-await page.goto(`http://localhost:${port}${path}`, { waitUntil: 'networkidle0' })
+await page.goto(`http://127.0.0.1:${port}${path}`, { waitUntil: 'networkidle0' })
 await new Promise((r) => setTimeout(r, 1800))
 
 if (mode === 'fullpage') {

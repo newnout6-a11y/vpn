@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "parse": {
+      "tooLarge": "Too much data to import: the limit is {{mib}} MB",
+      "nothingFound": "No supported servers found in this source",
+      "allSkipped": "No key could be imported; entries skipped: {{count}}",
+      "damagedBase64": "The text looks like base64 but does not decode: it is damaged, truncated or encrypted"
+    }
+  }
+}

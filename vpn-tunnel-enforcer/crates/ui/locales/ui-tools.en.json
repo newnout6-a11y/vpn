@@ -1,0 +1,126 @@
+{
+  "ui": {
+    "availability": {
+      "description": "Paste a link: the app checks it through the protection and directly, and tells you whether this site needs the VPN.",
+      "ms": "{{n}} ms",
+      "ago": {
+        "seconds": "{{n}} s ago",
+        "minutes": "{{n}} min ago",
+        "hours": "{{n}} h ago",
+        "days": "{{n}} d ago"
+      },
+      "check": {
+        "title": "Check a link",
+        "label": "Link to check",
+        "placeholder": "https://youtube.com or just youtube.com",
+        "run": "Check",
+        "running": "Checking…",
+        "blank": "Enter a link, for example youtube.com or https://www.instagram.com",
+        "invalid": "Enter a URL like example.com or https://example.com/path (HTTP and HTTPS are supported).",
+        "tunnelOff": "Protection is off. Only the current path without VPN is checked. To compare with protection, turn it on on the dashboard and check again."
+      },
+      "result": {
+        "title": "Result",
+        "for": "Result for {{url}}"
+      },
+      "verdict": {
+        "worksBoth": "Works either way",
+        "worksOnlyWithVpn": "Needs VPN",
+        "worksOnlyWithoutVpn": "Only without VPN",
+        "blockedEverywhere": "Not responding",
+        "authRequired": "Sign-in required",
+        "unknown": "Inconclusive"
+      },
+      "path": {
+        "protected": "Through protection (VPN)",
+        "direct": "Without protection (direct)",
+        "noData": "No data.",
+        "tunnelWasOff": "Protection was off during the check.",
+        "noDirect": "No data for the direct path.",
+        "full": "full probe",
+        "httpOnly": "HTTP only",
+        "opens": "Opens",
+        "geoBlock": "Geo block",
+        "notMeasured": "Not measured",
+        "fails": "Does not open",
+        "geoBlocked": "The network lets it through, but the site itself is closed to this region.",
+        "where": "Where",
+        "dnsSuspicious": "suspicious: {{ip}}",
+        "dnsFailed": "not resolved",
+        "tcpOk": "connection open",
+        "tcpFailed": "did not open",
+        "tlsFailed": "handshake failed",
+        "httpNone": "no response"
+      },
+      "routing": {
+        "title": "Routing check",
+        "run": "Check",
+        "running": "Checking…",
+        "description": "Compares the IP seen through the VPN with the IP seen directly. Different addresses mean the tunnel really separates the traffic. With the Smart RU mode on, it also checks that Russian sites see your real address.",
+        "tunnelOff": "Turn protection on to check the routing.",
+        "viaVpn": "Through VPN:",
+        "direct": "Direct:",
+        "ruSite": "Russian site sees:",
+        "verdict": {
+          "ok": "Works",
+          "partial": "Partly",
+          "leak": "Leak",
+          "tunnelOff": "Protection off",
+          "inconclusive": "Not measured"
+        }
+      },
+      "history": {
+        "title": "Recent checks",
+        "clear": "Clear history",
+        "empty": "No history yet."
+      }
+    },
+    "speedTest": {
+      "time": "Time",
+      "server": "Server · profile",
+      "noResult": "No results yet: run a test.",
+      "uploadMissing": "Upload not measured: the upload server did not answer.",
+      "plainHttp": "The download was measured over plain HTTP: the HTTPS test servers did not answer.",
+      "egressDirect": "The test reached the internet from your real address, bypassing the tunnel, so these figures do not describe the VPN.",
+      "egressNotChecked": "The exit IP was not checked during the test: it is unknown whether the measurement went through the tunnel.",
+      "egressSeen": "(test IP: {{ip}})",
+      "markChanged": "IP ≠",
+      "markDirect": "No VPN",
+      "markNotChecked": "IP ?",
+      "months": "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec",
+      "dateTime": "{{month}} {{day}}, {{time}}"
+    },
+    "tools": {
+      "demo": {
+        "badUrl": "Only HTTP and HTTPS links are supported.",
+        "routing": {
+          "ok": "The tunnel works: {{vpn}} is seen through the VPN, {{direct}} directly. The external address really changes.",
+          "okSmart": "Everything works as it should: foreign sites go through the VPN ({{vpn}}) and Russian sites go directly with your real IP ({{direct}}). The Smart RU mode really splits the traffic.",
+          "partial": "The tunnel works, but the Russian host went out through the VPN ({{ru}}) instead of directly ({{direct}}). The Russian domain lists may still be downloading; check again in a minute.",
+          "leak": "The same IP ({{vpn}}) is seen through the VPN and directly. The tunnel does not change the external address: this is a leak, or the proxy goes direct.",
+          "tunnelOff": "Protection is off: there is no routing to check.",
+          "inconclusive": "Could not measure both IPs (some echo servers did not answer). Check again."
+        },
+        "msg": {
+          "dns": "The name does not resolve to an IP.",
+          "tcp": "The TCP connection did not open: connection timed out.",
+          "tls": "The TLS handshake failed: connection reset. Possibly DPI blocking by SNI.",
+          "geo": "The site loaded but refused access for your region (geo block) (block text on a short page).",
+          "timeout": "The HTTP request returned no meaningful answer: connection timed out.",
+          "reset": "The HTTP request returned no meaningful answer: connection reset."
+        },
+        "reco": {
+          "both": "Your provider does not block the site (the network works). If the site still fails or says «Not supported in your country», it refuses access from Russia itself; turn the VPN on in that case.",
+          "onlyVpn": "The site works only through the VPN: your provider blocks it directly. Keep protection on.",
+          "onlyDirect": "The site works only without the VPN (typical for Russian services). Add it to the exceptions or turn protection off for a while.",
+          "geo": "The site itself blocks access from your region (content «not available in your country») although the network does not cut it. It opens through the VPN; keep protection on.",
+          "blocked": "The site answers neither through the VPN nor directly. It may be down right now or blocked by content (not by network); try another server.",
+          "auth": "The site answers but asks for a sign-in or refuses by IP: availability is not confirmed.",
+          "directOnly": "Your provider does not block the site (the network works). If the site still fails or says «Not supported in your country», it refuses access by IP itself; turn the VPN on.",
+          "directFailed": "The direct path fails, but the VPN path is not measured yet. Turn the VPN on and check again."
+        },
+        "historyError": "The history file is damaged and was not read."
+      }
+    }
+  }
+}

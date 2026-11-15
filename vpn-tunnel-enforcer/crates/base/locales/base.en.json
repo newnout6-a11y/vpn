@@ -1,0 +1,11 @@
+{
+  "errors": {
+    "validation": "Invalid operation parameters",
+    "permission": "Permission denied",
+    "network": "Network operation failed",
+    "conflict": "Operation unavailable in the current state",
+    "internal": "Operation failed",
+    "cancelled": "Operation cancelled",
+    "timeout": "Operation timed out"
+  }
+}

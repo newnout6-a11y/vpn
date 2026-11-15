@@ -1,0 +1,33 @@
+{
+  "automation": {
+    "coordinator": {
+      "conflict": "A higher-priority operation is still running",
+      "profileUnavailable": "The profile is unavailable: it was deleted, disabled or archived",
+      "noLocalProxy": "No local proxy found"
+    },
+    "scheduler": {
+      "title": "Schedule",
+      "started": "VPN turned on by schedule: {{name}}",
+      "stopped": "VPN turned off by schedule: {{name}}",
+      "connectFailed": "Schedule “{{name}}”: could not turn on the VPN. We will retry automatically.",
+      "profileUnavailable": "Schedule “{{name}}”: the profile is unavailable. We will retry automatically.",
+      "invalidName": "Enter a schedule name (up to 200 characters)",
+      "invalidDays": "The days of the week are invalid",
+      "profileRequired": "Choose a profile for a direct VPN schedule",
+      "notFound": "Schedule not found — it may have been deleted already",
+      "importSkipped": "Schedule “{{name}}” was not imported: its data is invalid"
+    },
+    "rotation": {
+      "title": "Rotation",
+      "switched": "Switching to profile {{name}}",
+      "failedRestored": "Rotation to “{{name}}” failed. Back on “{{previous}}”.",
+      "failedUnprotected": "Rotation to “{{name}}” failed. Protection after the restart is not confirmed — traffic may be going over the regular route.",
+      "failedNotStarted": "Rotation to “{{name}}” failed. Check the protection status.",
+      "nothingToRotate": "No other suitable profile — staying on the current one",
+      "notDirect": "Rotation only switches a session through a server from the list",
+      "noProfiles": "No profiles are selected for rotation. Select profiles in the settings and try again.",
+      "noneAvailable": "No profiles are available for rotation. Check that the VPN servers are reachable and try again.",
+      "busy": "A rotation is already running"
+    }
+  }
+}

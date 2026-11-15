@@ -1,6 +1,8 @@
-# Автоматическая проверка на Windows: приложение зависит от Win32, PowerShell и Electron, поэтому на Linux
-# эти проверки ничего не доказывают. Запускается только на pull_request и push в main (не от комментариев),
-# без секретов и с правами только на чтение.
+# CI of the Rust client. Windows runners: the product is Win32 code, so Linux would prove nothing about it.
+# GitHub-hosted Windows runners run jobs elevated, which makes CI the only place where the privileged parts
+# (WFP filters, TUN, scheduled tasks, legacy cleanup) and the installer run without a human: the `elevated`
+# and `package` jobs are the product's main proof for those parts.
+# Runs on pull_request and push to main (never on comments), without secrets, with read-only permissions.
 name: CI
 
 on:
@@ -9,32 +11,25 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      real_vpn:
-        description: Run the isolated real VPN scenario instead of ordinary checks (requires secret)
-        type: boolean
-        default: false
-      cancel_after_ms:
-        description: Delay before cancelling an admitted VPN operation (ms)
-        type: string
-        default: '500'
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.real_vpn || false }}
-  cancel-in-progress: ${{ !inputs.real_vpn }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
-  PYTHONUTF8: '1'
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  # Same toolchain as `rust-version` in the workspace Cargo.toml; bump both together.
+  RUST_TOOLCHAIN: '1.99.1'
 
 jobs:
-  app:
-    if: ${{ !inputs.real_vpn }}
-    name: Приложение (Windows)
-    runs-on: windows-latest
-    timeout-minutes: 40
+  rust:
+    name: Rust (fmt, clippy, tests)
+    runs-on: windows-2025
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -42,73 +37,190 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false # токен не нужен после загрузки кода и не должен остаться в .git/config
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+          persist-credentials: false # the token is not needed after checkout and must not stay in .git/config
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Cargo registry cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          # Тесты должны идти на том Node, что работает в приложении: Electron 44.4.3 содержит Node 24.21.0.
-          # На Node 22.13 fs.lstat() по пути на Windows возвращает dev: 0 (fstat — реальное значение),
-          # из-за чего падают 17 тестов безопасности (runtimeArtifact, engineLogRetention); на Node 24.21 это не так.
-          node-version: '24.21.0'
-          cache: npm
-          cache-dependency-path: vpn-tunnel-enforcer/package-lock.json
-      # fast-uri и js-yaml уже закреплены на registry.npmjs.org в lockfile (PR #38); SSH rewrite не нужен.
-      - run: npm ci
-      # resources/*.exe не хранятся в git (.gitignore), а часть тестов запускает настоящие движки
-      # (проверка конфигов Xray/sing-box). Версии закреплены, SHA-256 сверяется с хешами из GitHub API.
-      - name: Движки для тестов (версии закреплены, SHA-256 проверяется)
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: cargo-registry-${{ hashFiles('vpn-tunnel-enforcer/Cargo.lock', 'vpn-tunnel-enforcer/xtask/Cargo.lock') }}
+          restore-keys: cargo-registry-
+      # Archives are re-verified against the pins after every restore, so the cache cannot inject bytes.
+      - name: Pinned download cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: vpn-tunnel-enforcer/target/download-cache
+          key: pinned-downloads-${{ hashFiles('vpn-tunnel-enforcer/resources/engines.toml') }}
+      - name: rustfmt
+        run: |
+          cargo fmt --all --check
+          cargo fmt --manifest-path xtask/Cargo.toml --check
+      # Engine-check tests skip quietly without the binaries; `verify` turns a missing file into a failure.
+      - name: Pinned engines (SHA-256 of every archive and file)
+        run: |
+          cargo xtask engines
+          cargo xtask verify
+      - name: clippy
+        run: |
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo clippy --manifest-path xtask/Cargo.toml --target-dir target/xtask --all-targets --locked -- -D warnings
+      - name: Tests
+        env:
+          # Tests that open a listener on the LAN address (skipped on workstations: firewall prompt).
+          VPNTE_LAN_TESTS: '1'
+        # --no-fail-fast: every failing crate in one run (the job is elevated, so a failure in one
+        # crate would otherwise hide the elevated-only failures of the crates after it).
+        run: |
+          cargo test --workspace --locked --no-fail-fast
+          cargo test --manifest-path xtask/Cargo.toml --target-dir target/xtask --locked
+      # WP-12 lab engine (mihomo for AmneziaWG, AT-12-002): the crates with a `lab` feature built,
+      # linted and tested with it (the app's feature turns on every other one). A production build
+      # (`cargo xtask dist`, the package job) never enables it; the lab tests run the pinned mihomo
+      # from `cargo xtask engines` on 127.0.0.1 with fake keys only.
+      - name: Lab feature (check, clippy, tests)
+        env:
+          VPNTE_LAN_TESTS: '1'
+        run: |
+          lab=(-p vpnte-base -p vpnte-engine -p vpnte-tunnel -p vpnte-probes -p vpnte-ui -p vpnte-app)
+          cargo check "${lab[@]}" --all-targets --locked --features vpnte-app/lab
+          cargo clippy "${lab[@]}" --all-targets --locked --features vpnte-app/lab -- -D warnings
+          cargo test "${lab[@]}" --locked --no-fail-fast --features vpnte-app/lab
+
+  docs:
+    name: Acceptance traceability (docs)
+    # Pure Python over docs/ (AGENTS.md Definition of Done: exit 0); no Win32 needed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # the token is not needed after checkout and must not stay in .git/config
+      - name: check-coverage.py
+        run: python3 docs/04-приёмочные-тесты/traceability/check-coverage.py
+
+  elevated:
+    name: Privileged tests (elevated runner)
+    needs: rust
+    # A fresh machine: these tests create and remove real WFP objects, adapters and tasks.
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: vpn-tunnel-enforcer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # the token is not needed after checkout and must not stay in .git/config
+      - name: Runner must be elevated
         shell: pwsh
         run: |
-          $tmp = Join-Path $env:RUNNER_TEMP 'engines'
-          New-Item -ItemType Directory -Force $tmp | Out-Null
-          function Get-Engine([string]$Url, [string]$Sha256, [string]$ZipName, [string[]]$Files) {
-            $zip = Join-Path $tmp $ZipName
-            Invoke-WebRequest -Uri $Url -OutFile $zip
-            $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-            if ($actual -ne $Sha256) { throw "SHA-256 mismatch for ${ZipName}: $actual" }
-            $dir = Join-Path $tmp ([IO.Path]::GetFileNameWithoutExtension($ZipName))
-            Expand-Archive $zip $dir -Force
-            foreach ($name in $Files) {
-              $found = Get-ChildItem $dir -Recurse -Filter $name | Select-Object -First 1
-              if (-not $found) { throw "$name not found in $ZipName" }
-              Copy-Item $found.FullName (Join-Path $env:GITHUB_WORKSPACE "vpn-tunnel-enforcer/resources/$name")
-            }
+          $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'The privileged tests need an elevated runner; they would prove nothing here.'
           }
-          Get-Engine 'https://github.com/XTLS/Xray-core/releases/download/v26.7.28/Xray-windows-64.zip' 'c7172078fca4711bcd92a4774dcd1822544579c58816197575c47533317fd8d1' 'Xray-windows-64.zip' @('xray.exe')
-          Get-Engine 'https://github.com/SagerNet/sing-box/releases/download/v1.13.13/sing-box-1.13.13-windows-amd64.zip' 'aea1fa983134a2e2d0600581d1178e98bd6bb93ae12ad8c333eaacae68a1694c' 'sing-box-1.13.13-windows-amd64.zip' @('sing-box.exe')
-      - name: Typecheck
-        run: npm run typecheck
-      - name: Unit-тесты
-        run: npm test
-      - name: Live probe — закрытие SOCKS, TLS и дочерних процессов
-        run: npm test -- --mode integration src/main/liveServerProbe.handshakeDrain.itest.ts src/main/keyHealthChecker.transportDrain.itest.ts src/main/socksUpstreamProbe.itest.ts
-      - name: Маршруты Windows — read-only Win32/CIM
-        run: npm test -- --mode integration src/main/native/selectedRouteInterfacesCore.itest.ts src/main/native/ownedTunInterfaceCore.itest.ts
-      - name: Runtime Windows — read-only Win32/CIM
-        env:
-          VPNTE_REQUIRE_CIM_RUNTIME_COMPARISON: '1'
-        run: npm test -- --mode integration src/main/native/ownedRuntimeStateCore.itest.ts
-      - name: Трассировка приёмочных тестов
-        working-directory: .
-        run: python docs/04-приёмочные-тесты/traceability/check-coverage.py
-      # Unit mocks do not reproduce contextBridge dropping custom Error fields.
-      # Use the built production preload and real hidden windows in isolated userData.
-      - name: IPC — реальный contextBridge и production CSP
+      - name: Toolchain
         run: |
-          npm run build
-          node scripts/test-electron-runtime.mjs
-          node scripts/test-wp1-native.mjs --ipc-only
-          npm run test:real-vpn:unit
-      # Real BFE ABI/read-back inside an aborted transaction; never commits
-      # filters. This supplements mocks, not packet/reboot/OS-matrix L3.
-      - name: IPv6 WFP — нативный ABI и откат транзакции
-        shell: powershell
-        run: ./scripts/test-wfp-ipv6-native.ps1 -OutputPath "$env:RUNNER_TEMP/wp3-wfp-native.json"
-      # Нативные чтения запускаются под настоящим Electron: фатальная ошибка koffi под Electron не видна из Node.
-      - name: Нативные чтения под Electron
-        run: npm run test:electron-probe
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Cargo registry cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: cargo-registry-${{ hashFiles('vpn-tunnel-enforcer/Cargo.lock', 'vpn-tunnel-enforcer/xtask/Cargo.lock') }}
+          restore-keys: cargo-registry-
+      - name: Pinned download cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: vpn-tunnel-enforcer/target/download-cache
+          key: pinned-downloads-${{ hashFiles('vpn-tunnel-enforcer/resources/engines.toml') }}
+      - name: Pinned engines
+        run: |
+          cargo xtask engines
+          cargo xtask verify
+      # Tests marked #[ignore = "needs elevation"] (and any other ignored test); one at a time because they
+      # share machine-wide state (WFP provider, TUN adapter, task folder).
+      # A finished crate the rest of the workspace does not depend on yet: prove its privileged code early.
+      - name: 'winnet: unprivileged tests'
+        run: cargo test -p vpnte-winnet
+      - name: 'winnet: real WFP objects and the autostart task'
+        run: cargo test -p vpnte-winnet -- --ignored elevated_ --test-threads=1 --nocapture
+      # The helper service: install, pipe, TUN session, upgrade over the running service, the review
+      # fixes (a failed upgrade starts the service again; "Always" filters go before the service),
+      # uninstall. It also builds the service exe the app's end-to-end test installs next.
+      - name: 'service: install, pipe, TUN session, upgrade, uninstall'
+        # A step limit, not only the job's: a hang then fails this step and its log is kept.
+        timeout-minutes: 15
+        run: cargo test -p vpnte-service --locked -- --ignored elevated_ --test-threads=1 --nocapture
+      - name: 'app: Tunnel mode through the installed service (end to end)'
+        timeout-minutes: 15
+        run: cargo test -p vpnte-app --lib --locked -- --ignored elevated_remote --test-threads=1 --nocapture
+      - name: Tests that need elevation
+        timeout-minutes: 25
+        run: cargo test --workspace --locked --no-fail-fast -- --ignored --test-threads=1
+
+  package:
+    name: Installer (build, silent install, upgrade, uninstall)
+    needs: rust
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: vpn-tunnel-enforcer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # the token is not needed after checkout and must not stay in .git/config
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Cargo registry cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: cargo-registry-${{ hashFiles('vpn-tunnel-enforcer/Cargo.lock', 'vpn-tunnel-enforcer/xtask/Cargo.lock') }}
+          restore-keys: cargo-registry-
+      - name: Pinned download cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: vpn-tunnel-enforcer/target/download-cache
+          key: pinned-downloads-${{ hashFiles('vpn-tunnel-enforcer/resources/engines.toml') }}
+      - name: NSIS (pinned)
+        run: cargo xtask nsis
+      - name: Build the installer
+        run: cargo xtask dist
+      # GitHub sets CI=true; smoke-install refuses to run anywhere else. The installer is per-user (no
+      # administrator rights); the runner is elevated, so smoke-install also checks that nothing machine-wide
+      # (HKLM keys, all-users links) was written, apart from the helper service it installs on purpose (one
+      # Windows prompt for people, none here): installed, running and answering after the install and the
+      # upgrade, gone with its folder and WFP objects after the uninstall.
+      - name: Silent per-user install, upgrade over itself, uninstall
+        run: cargo xtask smoke-install
+      # The repository is public: only the installer and its checksums, never logs or user data.
+      - name: Upload the installer
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vpnte-installer-${{ github.sha }}
+          path: |
+            vpn-tunnel-enforcer/target/dist/VPN-Tunnel-Enforcer-Setup-*.exe
+            vpn-tunnel-enforcer/target/dist/VPN-Tunnel-Enforcer-*-portable.zip
+            vpn-tunnel-enforcer/target/dist/vpnte-service-*.exe
+            vpn-tunnel-enforcer/target/dist/checksums.txt
+          if-no-files-found: error
+          retention-days: 7
 
   website:
-    if: ${{ !inputs.real_vpn }}
     name: Сайт (сборка и HTML)
     # Сборщик и линтер — чистый Node без зависимостей и без Win32: хватает Linux-раннера.
     # Проверки в браузере (tools/check.mjs, fontcheck.mjs) требуют Chrome и сюда не входят.
@@ -130,25 +242,3 @@ jobs:
         run: node --test
       - name: Баланс тегов и ссылки
         run: node tools/lint-html.mjs
-
-  sidecar:
-    if: ${{ !inputs.real_vpn }}
-    name: ETW-сайдкар (Rust)
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false # токен не нужен после загрузки кода и не должен остаться в .git/config
-      - name: cargo test
-        shell: bash
-        run: cargo test --locked --manifest-path vpn-tunnel-enforcer/native/vpnte-etw-sidecar/Cargo.toml
-
-  real-vpn:
-    name: Реальный VPN-сценарий (отдельная Windows)
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.real_vpn && github.actor == github.repository_owner }}
-    uses: ./.github/workflows/real-vpn.yml
-    with:
-      cancel_after_ms: ${{ inputs.cancel_after_ms }}
-    secrets:
-      VPNTE_REAL_SCENARIO: ${{ secrets.VPNTE_REAL_SCENARIO }}

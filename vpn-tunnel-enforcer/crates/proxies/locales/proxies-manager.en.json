@@ -1,0 +1,15 @@
+{
+  "proxies": {
+    "degradation": {
+      "processFailed": "The proxy did not start or its process ended",
+      "healthFailureBudgetExhausted": "Disabled after repeated failed checks",
+      "egressIpChangedWithoutRotation": "The exit IP changed without a profile change",
+      "rotationDidNotChangeEgressIp": "The profile changed, but the exit IP stayed the same",
+      "duplicateEgressIp": "Another proxy already exits through this IP",
+      "egressProbeFailed": "The route check failed"
+    },
+    "slot": {
+      "spoofDropped": "\"{{name}}\": the provider's TLS hello spoofing (tls.spoof) works only in the tunnel through the helper service; this proxy runs without it."
+    }
+  }
+}

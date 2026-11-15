@@ -1,0 +1,9 @@
+{
+  "winnet": {
+    "autostart": {
+      "denied": "Windows refused to change autostart (access denied). The setting is unchanged.",
+      "disabledByUser": "Autostart is turned off in Task Manager (Startup apps). Turn VPN Tunnel Enforcer on there to start it when you sign in to Windows.",
+      "stateUnknown": "Autostart state is unknown: the change failed and the previous setting could not be restored. Check VPN Tunnel Enforcer in Task Manager under Startup apps."
+    }
+  }
+}

@@ -1,0 +1,215 @@
+//! Start inputs that do not depend on the capture: loopback listeners, the routing fragments,
+//! the local-proxy address and the published session endpoints.
+use std::net::Ipv4Addr;
+use std::path::PathBuf;
+
+use vpnte_base::types::{Creds, Loopback};
+use vpnte_base::{AppError, AppResult, Msg};
+use vpnte_core::net::HostPort;
+use vpnte_engine::clash_api::ClashEndpoint;
+use vpnte_engine::ports;
+use vpnte_engine::routing::RoutingInputs;
+use vpnte_engine::routing::bypass;
+use vpnte_engine::routing::plan::{self, Scope};
+use vpnte_engine::routing::process::AppPath;
+use vpnte_engine::routing::smart_ru::SmartRu;
+use vpnte_engine::singbox_config::{Listeners, RoutingParts};
+use vpnte_profiles::model::{Host, Kind, Profile};
+
+use super::UserInputs;
+use super::capture::CaptureProof;
+use crate::api::{ProxyEndpoint, SessionEndpoints};
+
+/// Fresh loopback listeners for one sing-box run: controller, `mixed-direct-in`, the probe
+/// inbound for direct VPN modes and `dns-bootstrap-in` for the Xray slots. `taken` = ports the
+/// session already uses (the Xray slots).
+pub(super) fn listeners(
+    direct_vpn: bool,
+    slots: bool,
+    taken: &[u16],
+) -> AppResult<(ClashEndpoint, Listeners)> {
+    let mut used = taken.to_vec();
+    let clash = ClashEndpoint::allocate(&used)?;
+    used.push(clash.port);
+    let loopback = |used: &mut Vec<u16>, udp: bool| -> AppResult<u16> {
+        let port = ports::alloc_port(udp, used)?;
+        used.push(port);
+        Ok(port)
+    };
+    let direct = Loopback {
+        port: loopback(&mut used, false)?,
+        creds: Some(ports::creds()),
+    };
+    let probe = if direct_vpn {
+        Some(Loopback {
+            port: loopback(&mut used, false)?,
+            creds: Some(ports::creds()),
+        })
+    } else {
+        None
+    };
+    let dns_bootstrap = if slots {
+        Some(loopback(&mut used, true)?)
+    } else {
+        None
+    };
+    let listeners = Listeners {
+        clash_port: clash.port,
+        clash_secret: clash.secret.clone(),
+        direct,
+        probe,
+        dns_bootstrap,
+    };
+    Ok((clash, listeners))
+}
+
+/// Every app-owned port of a run (a bind failure on one of them is retried once).
+pub(super) fn own_ports(l: &Listeners) -> Vec<u16> {
+    let mut ports = vec![l.clash_port, l.direct.port];
+    ports.extend(l.probe.as_ref().map(|p| p.port));
+    ports.extend(l.dns_bootstrap);
+    ports
+}
+
+/// Strict `host:port` of a local upstream proxy.
+pub(super) fn proxy_addr(raw: &str) -> AppResult<HostPort> {
+    HostPort::parse(raw).map_err(|e| {
+        AppError::validation(Msg::new("tunnel.runtime.proxyAddressInvalid")).with_source(e)
+    })
+}
+
+/// The profile dials a host name (server or a WireGuard peer), so the engine needs its
+/// bootstrap resolver.
+pub(super) fn endpoint_is_hostname(p: &Profile) -> bool {
+    let named = |h: &Host| matches!(h, Host::Domain(_));
+    named(&p.server)
+        || matches!(&p.kind, Kind::Wireguard(wg) if wg.peers.iter().any(|peer| named(&peer.host)))
+}
+
+/// Route / DNS fragments of this run plus the warnings the user must see; the apps page's
+/// scope comes with the inputs (the app's own exe among them).
+pub(super) fn routing(
+    user: &UserInputs,
+    engine_paths: &[PathBuf],
+    local_proxy: bool,
+    physical_dns: &[Ipv4Addr],
+    endpoint_is_hostname: bool,
+) -> (RoutingParts, Vec<Msg>) {
+    let engines: Vec<AppPath> = engine_paths
+        .iter()
+        .filter_map(|p| match AppPath::parse(&p.to_string_lossy()) {
+            Ok(path) => Some(path),
+            Err(e) => {
+                tracing::warn!(error = %e, "engine path not usable in a process rule");
+                None
+            }
+        })
+        .collect();
+    let split = user.split();
+    let scope = match &user.only_listed {
+        Some(own) => Scope::OnlyListed { own },
+        None => Scope::All,
+    };
+    let inputs = RoutingInputs {
+        smart: SmartRu {
+            enabled: user.smart_ru,
+            maps_direct: user.smart_ru_maps_direct,
+        },
+        rule_set_dir: user.rule_set_dir.as_deref(),
+        domain_rules: &user.domain_rules,
+        split: &split,
+        engine_paths: &engines,
+        third_party_cores: local_proxy,
+        dns: user.dns.as_ref(),
+        physical_dns,
+        endpoint_is_hostname,
+    };
+    let mut fragments = plan::build_scoped(&inputs, scope);
+    let warnings = fragments.warnings.iter().map(|w| w.msg()).collect();
+    fragments.parts.proxy_bypass = bypass::route_rules(&bypass::from_stored(&user.proxy_bypass));
+    (fragments.parts, warnings)
+}
+
+fn proxy_endpoint(l: &Loopback) -> ProxyEndpoint {
+    let (user, pass) = l
+        .creds
+        .as_ref()
+        .map(|Creds { user, pass }| (user.clone(), pass.clone()))
+        .unwrap_or_default();
+    ProxyEndpoint {
+        port: l.port,
+        user,
+        pass,
+    }
+}
+
+/// The plain data the app reads to observe the session.
+pub(super) fn endpoints(
+    clash: &ClashEndpoint,
+    l: &Listeners,
+    proof: &CaptureProof,
+    logs: Vec<PathBuf>,
+) -> SessionEndpoints {
+    SessionEndpoints {
+        clash_port: clash.port,
+        clash_secret: clash.secret.clone(),
+        direct: proxy_endpoint(&l.direct),
+        probe: l.probe.as_ref().map(proxy_endpoint),
+        tun_luid: proof.luid,
+        tun_alias: proof.alias.clone(),
+        proxy_port: proof.port,
+        logs,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn rules(only_listed: Option<Vec<String>>) -> RoutingParts {
+        let user = UserInputs {
+            split_vpn: vec!["browser".into()],
+            only_listed,
+            ..UserInputs::default()
+        };
+        routing(&user, &[], false, &[], false).0
+    }
+
+    /// Re-check item 16: the inputs' scope reaches the routing, with the app's own exe kept
+    /// inside it; without one the listed VPN apps are forced in as before (P4).
+    #[test]
+    fn the_scope_of_the_inputs_reaches_the_routing() {
+        let only = rules(Some(vec!["own".into()]));
+        assert!(only.process_rules.is_empty(), "{:?}", only.process_rules);
+        assert_eq!(
+            only.domain_rules,
+            vec![json!({
+                "process_path_regex": ["browser", "own"], "invert": true, "outbound": "direct-out",
+            })]
+        );
+        let all = rules(None);
+        assert!(all.domain_rules.is_empty());
+        assert_eq!(
+            all.process_rules,
+            vec![json!({ "process_path_regex": ["browser"], "outbound": "proxy-out" })]
+        );
+    }
+
+    /// fixlists-b3: the user's «Не через прокси» entries reach the routing as direct rules
+    /// (the engine config places them under proxy capture only); a broken one is skipped.
+    #[test]
+    fn the_bypass_list_reaches_the_routing() {
+        let user = UserInputs {
+            proxy_bypass: vec!["*.corp.example".into(), "not a host".into()],
+            ..UserInputs::default()
+        };
+        let parts = routing(&user, &[], false, &[], false).0;
+        assert_eq!(
+            parts.proxy_bypass,
+            vec![json!({ "domain_suffix": [".corp.example"], "outbound": "direct-out" })]
+        );
+        assert!(rules(None).proxy_bypass.is_empty());
+    }
+}

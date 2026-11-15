@@ -1,0 +1,25 @@
+[package]
+name = "vpnte-winnet"
+description = "Windows system layer: adapters and routes, processes and jobs, counters, ICMP, WFP protection, registry, environment, elevation, autostart, single instance, clipboard, power events, toasts."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ipnet.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+vpnte-base.workspace = true
+windows = { workspace = true, features = ["Win32_Networking_WinInet", "Win32_System_Com_StructuredStorage", "Win32_UI_Shell_PropertiesSystem"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+{
+  "core": {
+    "store": {
+      "dataDirLocked": "The app data is already in use by another running instance of VPN Tunnel Enforcer.",
+      "readOnly": "{{file}} is open read-only: changes are not saved.",
+      "writeFailed": "Could not save {{file}}. The change was not applied.",
+      "encodeFailed": "Could not encrypt the data for {{file}}: Windows secure storage is unavailable. The change was not saved.",
+      "newerVersion": "{{file}} was created by a newer version: changes are not saved.",
+      "corruptKept": "{{file}} is damaged. It is kept unchanged and open read-only; under Maintenance you can set it aside and start with an empty list.",
+      "unreadable": "{{file}} could not be read. It is open read-only: changes are not saved.",
+      "corruptSetAside": "{{file}} was damaged and has been set aside as {{backup}}; defaults are in use."
+    },
+    "settings": {
+      "proxyOverrideInvalid": "Enter the proxy as host:port, optionally with a scheme and login: socks5://user:pass@host:port.",
+      "legacyProxyDropped": "The manual proxy from the old version was not recognised and was not imported. Please enter it again in Settings."
+    }
+  }
+}

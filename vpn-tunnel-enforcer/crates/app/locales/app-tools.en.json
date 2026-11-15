@@ -1,0 +1,9 @@
+{
+  "app": {
+    "tools": {
+      "speed": {
+        "softUnavailable": "The speed test works only in Tunnel mode."
+      }
+    }
+  }
+}

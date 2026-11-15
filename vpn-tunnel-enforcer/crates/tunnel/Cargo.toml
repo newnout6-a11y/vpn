@@ -1,0 +1,38 @@
+[package]
+name = "vpnte-tunnel"
+description = "Connection runtime and lifecycle: start, stop, switch, state machine and session history."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+vpnte-base.workspace = true
+vpnte-core.workspace = true
+vpnte-engine.workspace = true
+vpnte-profiles.workspace = true
+vpnte-winnet.workspace = true
+
+[dev-dependencies]
+# speed3 S3-00: budget tests run under a paused clock (`start_paused`); the probes' handshake
+# budget replays lab sequences with the real arithmetic.
+tokio = { workspace = true, features = ["test-util"] }
+vpnte-probes.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# WP-12 lab engine mihomo (AmneziaWG sessions): never enabled by a production build.
+lab = ["vpnte-engine/lab"]

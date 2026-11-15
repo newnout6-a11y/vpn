@@ -29,6 +29,7 @@ function safeFile(url) {
   return file === DIST || file.startsWith(DIST + sep) ? { file } : { code: 403 }
 }
 
+// Только loopback: слушатель на всех адресах заставил бы брандмауэр Windows спрашивать разрешение у человека за компьютером.
 http.createServer((req, res) => {
   const r = safeFile(req.url)
   if (r.code) { res.writeHead(r.code).end(); return }
@@ -41,4 +42,4 @@ http.createServer((req, res) => {
   }
   res.writeHead(200, { 'Content-Type': TYPES[extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' })
   res.end(readFileSync(file))
-}).listen(PORT, () => console.log(`→ http://localhost:${PORT}`))
+}).listen(PORT, '127.0.0.1', () => console.log(`→ http://127.0.0.1:${PORT}`))

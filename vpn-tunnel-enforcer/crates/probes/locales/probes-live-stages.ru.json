@@ -1,0 +1,46 @@
+{
+  "probes": {
+    "liveStages": {
+      "target": {
+        "emptyHost": "Укажите адрес сервера",
+        "refused": "Адрес {{ip}} локальный или служебный: проверка не выполняется"
+      },
+      "notChecked": {
+        "udpTransport": "Не проверялось: протокол работает поверх UDP",
+        "reality": "Не проверялось: REALITY-маскировка (прямой TLS-запрос бесполезен и рискован)",
+        "basicMode": "Не проверялось: только в расширенной проверке",
+        "tunnelTransition": "Не проверялось: туннель подключается или переключается",
+        "geoDisabled": "Не проверялось: геолокация отключена в настройках",
+        "handshakeBudget": "Не проверялось: лимит TLS-рукопожатий к этому серверу исчерпан (защита от заморозки)"
+      },
+      "dns": {
+        "resolver": {
+          "system": "Системный резолвер (OS/Hosts)",
+          "googleDoh": "Google Public DNS (DoH)",
+          "cloudflareDoh": "Cloudflare DNS (DoH)"
+        },
+        "systemVsDoh": "Системный DNS ([{{system}}]) не совпадает с публичными DoH ([{{doh}}]) (возможно split-horizon DNS или CDN)",
+        "googleVsCloudflare": "Google DoH ([{{google}}]) и Cloudflare DoH ([{{cloudflare}}]) вернули разные адреса (GeoDNS/Anycast)"
+      },
+      "path": {
+        "noRoute": "Таблица маршрутизации не вернула активный маршрут",
+        "failed": "Сбой проверки маршрута Windows"
+      },
+      "pmtu": {
+        "icmpBlocked": "ICMP echo заблокирован узлом или сетью; показан MTU сетевого адаптера",
+        "atLeast": "PMTU не менее 1500 байт (верхний проверенный payload {{top}}B принят; точная граница не измерена)",
+        "confirmed": "Подтверждённый PMTU {{pmtu}} байт (точная граница [{{pmtu}} .. {{rejected}}]B)",
+        "range": "PMTU в интервале [{{pmtu}} .. {{max}}] байт (не менее {{pmtu}} байт, большие размеры не ответили)",
+        "blackhole": "Подозрение на PMTU Blackhole: большие пакеты отбрасываются без ICMP PacketTooBig",
+        "interfaceOnly": "MTU локального интерфейса {{mtu}} байт (не является подтверждённым path PMTU)",
+        "undetermined": "PMTU не удалось определить"
+      },
+      "geo": {
+        "rateLimited": "Превышен лимит запросов к сервису геолокации (429). Повторите попытку позже.",
+        "unreachable": "Не удалось подключиться к сервису геолокации.",
+        "cancelled": "Проверка отменена",
+        "failed": "Ошибка сервиса геолокации: {{detail}}"
+      }
+    }
+  }
+}

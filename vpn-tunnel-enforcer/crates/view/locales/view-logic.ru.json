@@ -1,0 +1,32 @@
+{
+  "view": {
+    "dash": "—",
+    "leak": {
+      "outsideProxy": "Вне прокси",
+      "outsideProxyHint": "Программы, которые не используют системный прокси, и UDP идут напрямую: так работает режим «Прокси»."
+    },
+    "status": {
+      "proxyDown": "Сервер не отвечает — трафик заблокирован",
+      "degraded": "Подключено — защита ослаблена",
+      "degradedTun": "Подключено — защита ослаблена: второй VPN/TUN {{name}}"
+    },
+    "identity": {
+      "country": "{{country}}",
+      "countryCity": "{{country}}, {{city}}",
+      "ping": "{{ms}} мс",
+      "metaPing": "{{protocol}} · {{ms}} мс",
+      "metaOffline": "{{protocol}} · офлайн",
+      "metaUnchecked": "{{protocol}} · не проверен",
+      "unmeasured": "ещё не определён"
+    },
+    "traffic": {
+      "hover": "{{mbps}} Мбит/с · {{n}} с назад"
+    },
+    "fact": {
+      "modeProxy": "Прокси",
+      "modeTunnel": "Туннель",
+      "ksProxy": "Через прокси",
+      "ksNeedsAdmin": "Нужна служба-помощник"
+    }
+  }
+}

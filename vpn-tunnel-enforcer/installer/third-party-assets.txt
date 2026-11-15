@@ -1,0 +1,43 @@
+Other bundled assets (hand-kept: cargo metadata cannot see them)
+
+- Inter Tight and JetBrains Mono fonts: SIL Open Font License 1.1, texts in OFL-InterTight.txt and
+  OFL-JetBrainsMono.txt in this folder.
+- Smart RU rule sets (sing-box data files in resources\, replaced by a managed refresh):
+  geoip-ru.srs from SagerNet sing-geoip (GPL-3.0-or-later, https://github.com/SagerNet/sing-geoip),
+  built from Dreamacro/maxmind-geoip: this product includes GeoLite2 data created by MaxMind,
+  available from https://www.maxmind.com. geosite-category-gov-ru.srs from SagerNet sing-geosite
+  (GPL-3.0-or-later, https://github.com/SagerNet/sing-geosite), built from
+  v2fly/domain-list-community (MIT License). geosite-ru-blocked.srs and geoip-ru-blocked.srs from
+  runetfreedom russia-v2ray-rules-dat (GPL-3.0, https://github.com/runetfreedom/russia-v2ray-rules-dat).
+  The full GPL text is GPL-3.0.txt in this folder.
+- Microsoft Edge WebView2 Runtime Evergreen Bootstrapper (resources\MicrosoftEdgeWebview2Setup.exe, "Microsoft
+  Edge Update Setup" 1.3.315.17): Copyright (c) Microsoft Corporation. Redistributed unmodified, as obtained from
+  Microsoft, under the distributable-code terms of the Microsoft Edge WebView2 Runtime License
+  (https://developer.microsoft.com/microsoft-edge/webview2/) and Microsoft's distribution guidance
+  (https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution). Setup and the app run it only
+  when the WebView2 Runtime is missing, without administrator rights, so the runtime is installed for the
+  current user. The WebView2 Runtime is Microsoft software under Microsoft's own terms and may send data to
+  Microsoft as described in the Microsoft Privacy Statement (https://go.microsoft.com/fwlink/?LinkId=521839).
+- flag-icons 7 (country flags, only the flags in use): MIT License, https://github.com/lipis/flag-icons
+
+    The MIT License (MIT)
+    
+    Copyright (c) 2013 Panayiotis Lipiridis
+    
+    Permission is hereby granted, free of charge, to any person obtaining a copy of
+    this software and associated documentation files (the "Software"), to deal in
+    the Software without restriction, including without limitation the rights to
+    use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+    of the Software, and to permit persons to whom the Software is furnished to do
+    so, subject to the following conditions:
+    
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+    
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.

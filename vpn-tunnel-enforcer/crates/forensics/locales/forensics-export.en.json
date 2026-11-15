@@ -1,0 +1,54 @@
+{
+  "forensics": {
+    "summary": {
+      "check": {
+        "trafficLeakDetected": "Traffic leak outside the tunnel",
+        "dnsLeakDetected": "DNS leak",
+        "tunPathConfirmed": "Traffic goes through the tunnel",
+        "killSwitchBlockedTraffic": "Kill switch blocked traffic",
+        "windowsFirewallBlockedTraffic": "Windows Firewall blocked traffic",
+        "remoteResetLikely": "Remote connection resets likely",
+        "timeoutOrPacketLossLikely": "Timeouts or packet loss likely",
+        "mtuIssueLikely": "MTU problem likely",
+        "singBoxFailureLikely": "sing-box failure likely"
+      },
+      "finding": {
+        "detected": "detected",
+        "notDetected": "not detected",
+        "unknown": "no data"
+      },
+      "warning": {
+        "manifestMissing": "The session manifest is missing",
+        "etwNotRun": "No ETW events were recorded",
+        "etwNoData": "ETW ran but recorded no network events",
+        "etwEventsLost": "Some ETW events were lost",
+        "pktmonNotRun": "Packet capture did not run",
+        "noCounters": "No pktmon counters",
+        "malformedLines": "Some log lines could not be read",
+        "artifactUnreadable": "Some artefacts could not be read",
+        "appEventsDropped": "The app event log overflowed",
+        "noLeakTest": "No leak test ran in this session",
+        "noWfpDropSource": "WFP drops are not enumerated"
+      }
+    },
+    "export": {
+      "dialogTitle": "Save diagnostics",
+      "zipFilter": "ZIP archive",
+      "cleanupFailed": {
+        "title": "Diagnostics cleanup not finished",
+        "body": "Temporary files of the diagnostics archive may have been left on disk."
+      },
+      "stage": {
+        "preparing": "Preparing",
+        "settings": "Settings",
+        "logs": "Logs",
+        "system": "System information",
+        "runtime": "Engine configuration",
+        "recovery": "Recovery state",
+        "snapshots": "State snapshots",
+        "forensics": "Network forensics",
+        "finishing": "Finishing the archive"
+      }
+    }
+  }
+}

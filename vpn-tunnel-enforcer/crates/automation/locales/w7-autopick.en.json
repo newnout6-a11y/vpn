@@ -1,0 +1,30 @@
+{
+  "automation": {
+    "autopick": {
+      "status": {
+        "launching": "Connecting at start: “{{name}}”",
+        "confirming": "Checking whether “{{name}}” still carries traffic",
+        "refreshing": "“{{name}}” does not answer: updating its subscription",
+        "trying": "Trying “{{name}}” (round {{round}} of {{rounds}})",
+        "waiting": "No server answered. Trying again after a pause (round {{round}} of {{rounds}})",
+        "gaveUp": "No server answered in {{rounds}} rounds. Connect by hand or pick another server"
+      },
+      "exposure": {
+        "direct": "Traffic goes out directly, without the VPN",
+        "blocked": "The kill switch holds traffic until the connection is back",
+        "proxyBlocked": "Programs that use the system proxy wait; the others go out directly",
+        "tunnel": "Traffic stays inside the VPN connection",
+        "proxyTunnel": "Programs that use the system proxy stay inside the VPN connection; the others go out directly",
+        "unknown": "Whether traffic is held is not checked"
+      },
+      "launch": {
+        "failed": "Could not connect at start to “{{name}}”",
+        "connected": "Connected at start through “{{name}}”"
+      },
+      "rescue": {
+        "recovered": "Connection restored through “{{name}}”",
+        "gaveUp": "No server answered. Nothing more is tried until you connect or the network changes"
+      }
+    }
+  }
+}

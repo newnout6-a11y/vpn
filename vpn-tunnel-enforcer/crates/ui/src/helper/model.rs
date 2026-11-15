@@ -1,0 +1,111 @@
+//! The capability view: what the helper service and this process's rights allow right now.
+
+/// The helper service as the app finds it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Service {
+    /// Not installed: proxy mode works, the privileged features come with the service.
+    #[default]
+    Missing,
+    /// Installed and as new as the app (or its version is not known yet: no link so far).
+    Installed,
+    /// Installed and one protocol version older than the app (the oldest it links to): it
+    /// carries everything as it is (the app labels by its own fallbacks) and updates itself.
+    Older,
+    /// Installed and Windows is starting it (after a restart): its pipe answers in a moment.
+    Starting,
+    /// Installed but stopped: Tunnel mode waits for it, Proxy mode works without it.
+    Stopped,
+    /// Installed but too old for this app to speak to (it refused the link: two protocol
+    /// versions back, its update declined, review wire5-a1): Tunnel mode waits for its update,
+    /// Proxy mode works without it.
+    Outdated,
+}
+
+impl Service {
+    /// The line a privileged control shows while the installed service cannot carry it right
+    /// now (p-live2: Tunnel was offered with no hint while the service was down).
+    pub const fn pause_key(&self) -> Option<&'static str> {
+        match self {
+            Self::Starting => Some("ui.helper.starting"),
+            Self::Stopped => Some("ui.helper.stopped"),
+            Self::Outdated => Some("ui.helper.outdated"),
+            Self::Missing | Self::Installed | Self::Older => None,
+        }
+    }
+
+    /// Its one calm action is the update (the service's install verb over the old one).
+    pub const fn needs_update(&self) -> bool {
+        matches!(self, Self::Outdated)
+    }
+}
+
+/// How a privileged feature runs here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Ability {
+    /// Through the helper service.
+    Service,
+    /// In this process: the app was started as administrator (development, CI).
+    InProcess,
+    /// Comes with the helper service, which is not installed.
+    #[default]
+    NeedsService,
+    /// Not in this version: neither the app nor the service carries it here.
+    NotInVersion,
+}
+
+impl Ability {
+    /// The feature runs now (through the service or in this process).
+    pub const fn works(self) -> bool {
+        matches!(self, Self::Service | Self::InProcess)
+    }
+}
+
+/// A privileged feature a page shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feature {
+    /// Tunnel mode (TUN capture of every program).
+    Tunnel,
+    /// The WFP kill switch: its filters, leak protection and exceptions («Всегда» included).
+    KillSwitch,
+    /// Machine-wide browser policies (WebRTC hardening under HKLM).
+    Policies,
+    /// Packet capture (pktmon / ETW).
+    Capture,
+}
+
+/// One capability view, pushed by the app at start, after an install from the app and when the
+/// service's version becomes known.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Capability {
+    pub service: Service,
+    /// The app process runs elevated (development, CI; the shipped app never elevates).
+    pub elevated: bool,
+    pub tunnel: Ability,
+    pub kill_switch: Ability,
+    pub policies: Ability,
+    pub capture: Ability,
+}
+
+impl Capability {
+    /// How `feature` runs here.
+    pub const fn ability(&self, feature: Feature) -> Ability {
+        match feature {
+            Feature::Tunnel => self.tunnel,
+            Feature::KillSwitch => self.kill_switch,
+            Feature::Policies => self.policies,
+            Feature::Capture => self.capture,
+        }
+    }
+}
+
+impl Feature {
+    /// Stable id for markup and tests.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Tunnel => "tunnel",
+            Self::KillSwitch => "kill-switch",
+            Self::Policies => "policies",
+            Self::Capture => "capture",
+        }
+    }
+}

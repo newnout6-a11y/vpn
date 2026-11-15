@@ -1,0 +1,7 @@
+{
+  "profiles": {
+    "export": {
+      "sharedAsJson": "A share link cannot carry every setting of this key, so it was exported as JSON."
+    }
+  }
+}

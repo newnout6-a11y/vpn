@@ -30,7 +30,7 @@ body{margin:0;width:1200px;height:630px;background:#efebe2;color:#15140e;font-fa
 .c{position:absolute;left:80px;top:64px;right:80px;bottom:64px;display:flex;flex-direction:column;justify-content:space-between;border-top:2px solid #15140e;padding-top:28px}
 .b{display:flex;align-items:center;gap:16px;font:600 24px/1 "Unbounded",sans-serif;letter-spacing:-.03em}
 .b img{width:48px;height:48px}
-.b small{margin-left:auto;font:500 16px/1 "Fira Mono",monospace;letter-spacing:.12em;text-transform:uppercase;color:#5a5748}
+.b small{margin-left:auto;font:500 16px/1 "Fira Mono",monospace;letter-spacing:.02em;color:#5a5748}
 h1{margin:0;font:600 72px/1.06 "Unbounded",sans-serif;letter-spacing:-.05em;max-width:900px}
 h1 span{color:#c23a05}
 p{margin:0;font-size:28px;line-height:1.4;color:#4a4739;max-width:760px}
@@ -38,9 +38,9 @@ p{margin:0;font-size:28px;line-height:1.4;color:#4a4739;max-width:760px}
 .dot{width:12px;height:12px;background:#ff5a1f;flex:none}
 </style><div class="arch"></div>
 <div class="c">
-<div class="b"><img src="data:image/svg+xml;base64,${logo}">Tunnel Enforcer<small>Windows · sing-box</small></div>
+<div class="b"><img src="data:image/svg+xml;base64,${logo}">Tunnel Enforcer<small>Windows · Rust · sing-box и Xray</small></div>
 <h1 id="h">Туннель упал? <span>Интернет — тоже.</span></h1>
-<div class="row"><i class="dot"></i><p>Windows-клиент с fail-closed kill-switch · 10 протоколов · открытый код</p></div>
+<div class="row"><i class="dot"></i><p>Клиент VPN для Windows на Rust · открытый код</p></div>
 </div>`
 
 const b = await puppeteer.launch({ executablePath: process.env.CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', headless: true })
@@ -53,7 +53,7 @@ await new Promise((r) => setTimeout(r, 500))
 // страховка: шрифты загрузились, заголовок не вылезает за карточку
 const check = await p.evaluate(() => ({
   bitter: document.fonts.check('600 72px Unbounded', 'Туннель'),
-  golos: document.fonts.check('400 28px "Golos Text"', 'Windows-клиент'),
+  golos: document.fonts.check('400 28px "Golos Text"', 'Клиент'),
   h1Bottom: document.getElementById('h').getBoundingClientRect().bottom,
   rowTop: document.querySelector('.row').getBoundingClientRect().top
 }))

@@ -1,38 +1,65 @@
-# Архитектура VPN Tunnel Enforcer
+# Архитектура VPN Tunnel Enforcer 2.0 (Rust)
 
-Этот раздел является стартовой точкой для ревью и дальнейшей разработки. Он описывает фактические границы приложения и порядок чтения кода. Сначала обновляйте эти документы при появлении нового runtime-слоя, IPC-домена или фонового сервиса.
+Стартовая точка для ревью и разработки рабочего пространства `vpn-tunnel-enforcer/` (состояние на 12.11.2026).
+Решения продукта, слои и правила — `crates/CONTRACT.md`; публичный API крейта — `crates/<имя>/API.md`;
+журналы пакетов — `crates/<имя>/progress/`.
 
-## Быстрый маршрут чтения
+## Маршрут чтения
 
-1. [Карта модулей](./module-map.md) — где находится ответственность каждого слоя.
-2. [Маршрут ревью](./review-guide.md) — в каком порядке проверять изменение и какие инварианты не потерять.
-3. `src/shared/ipc-types.ts` — общие типы IPC.
-4. `src/preload/index.ts` — публичный bridge renderer → main и runtime-валидация аргументов.
-5. `src/main/index.ts` — жизненный цикл Electron, базовые IPC-обработчики и регистрация feature-модулей.
-6. Нужный feature-модуль main и соответствующая страница/component в renderer.
+1. `crates/CONTRACT.md` — решения продукта и правила для всех крейтов.
+2. [Карта крейтов](./module-map.md) — слои, зависимости, где какой модуль.
+3. [Маршрут ревью](./review-guide.md) — что проверять и какие инварианты не ломать.
+4. `crates/app/SERVICES.md` — как `app` связывает интерфейс с бэкендом, порядок запуска и остановки.
+5. `API.md` нужного крейта, затем его `src/`.
 
-## Runtime-контур
+## Один процесс
+
+Интерфейс и бэкенд живут в одном процессе `VPN Tunnel Enforcer.exe` (манифест `asInvoker`). Крейт `ui`
+бэкенд не вызывает: каждая страница объявляет view-модели и трейт `XxxApi` (`DashboardApi`, `ServersApi`,
+`SettingsApi`, `TrayApi` и др.), а `app` реализует их над общим `Arc<Backend>` и кладёт в контекст Dioxus.
+Дочерние процессы — только движки (`sing-box.exe`, `xray.exe`), `curl.exe` для проб утечек через адаптер и
+`pktmon.exe` для захвата пакетов; все под Job Object с kill-on-close, конфигурация — через stdin.
 
 ```mermaid
-flowchart LR
-  UI[React renderer] -->|window.electronAPI| PRELOAD[Preload bridge]
-  PRELOAD -->|validated IPC| MAIN[Electron main]
-  MAIN --> TUN[sing-box + Wintun]
-  MAIN --> SYS[Windows firewall / DNS / routes]
-  MAIN --> STORE[(electron-store)]
-  MAIN --> SIDE[PowerShell + Rust ETW sidecar]
+flowchart TD
+  UI["ui: страницы Dioxus в WebView2"] -->|"трейты XxxApi"| APP["app: Backend и реализации API"]
+  APP --> LC["tunnel::lifecycle: полоса, владельцы, исходы, история"]
+  LC --> RT["tunnel::runtime: актор старт / надзор / переключение / стоп"]
+  LC -->|"SoftProxy"| SOFT["automation: настройки «Прокси» → winnet::sysproxy, env, Git / Gradle / Studio"]
+  RT --> CAP{"Capture"}
+  CAP -->|"Tun: только от администратора"| TUN["TunCapture: адаптер Wintun, WFP winnet::wfp"]
+  CAP -->|"Proxy: без прав"| PRX["ProxyCapture: loopback mixed на 127.0.0.1"]
+  RT --> ENG["engine: конфигурации, sing-box.exe и xray.exe"]
+  APP --> SIDE["servers, probes, forensics, proxies, automation, cleanup"]
 ```
+
+## Подключение по шагам
+
+1. UI: «Подключить» → `DashboardApi::connect` в `app`; `svc_tunnel::decide::connect_target` выбирает цель по
+   источнику (сервер из списка или локальный прокси вроде Happ) и `routing_mode` (`Hard` → TUN, `Soft` → прокси).
+2. `tunnel::lifecycle`: полоса решает, кто вправе менять туннель (`Owner` по приоритету), и превращает цель в
+   `StartRequest` с `CaptureKind::Tun` или `CaptureKind::Proxy` и уровнем kill switch.
+3. `tunnel::runtime` (актор): `Capture::prepare` → конфигурация sing-box (`profiles::emit_singbox` +
+   `engine::singbox_config`; Xray-слоты — `engine::xray_config`) → запуск движков → готовность →
+   `Capture::begin` / `ready`. TUN: WFP-защита уровня kill switch и проверка адаптера; прокси: порт `mixed`
+   принимает соединения.
+4. В «Прокси» lifecycle применяет системный прокси через `SoftProxy` и считывает его обратно: «подключено»
+   только при обоих доказательствах. Затем — уведомление и строка истории подключений.
+5. Надзор: сторож процесса и выхода, перезапуск с паузами 2/5/10 с, переход на соседний сервер; остановка и
+   выход из приложения откатывают захват и настройки.
+
+Без прав `RuntimeDeps::tun = None`: старт «Туннеля» отвечает `Permission` сразу, без молчаливого перехода в
+«Прокси». Служба-помощник (`vpnte-service`) в этой фазе не создана.
 
 ## Главные инварианты
 
-- Renderer не вызывает Windows API, shell-команды или файловую систему напрямую.
-- Любой новый IPC-метод проходит через preload и получает валидацию аргументов до `ipcRenderer.invoke`.
-- Изменения состояния туннеля должны учитывать запуск, остановку, crash recovery и stale-process recovery.
-- Изменения firewall, DNS, IPv6 и маршрутов должны иметь симметричный rollback и проверку результата.
-- Секреты и VPN-ключи не попадают в UI-логи, диагностические ZIP и обычные сообщения ошибок.
-- Feature-модуль владеет своими IPC-каналами и регистрацией; `src/main/index.ts` только связывает модули и управляет жизненным циклом приложения.
-
-## Что пока намеренно не перемещено
-
-`src/main/index.ts`, `src/main/tunController.ts` и `src/renderer/pages/Servers.tsx` остаются крупными файлами. Их безопаснее дробить отдельными изменениями с тестами на границе каждого extracted service/component. Физическое перемещение всех файлов одним коммитом создаёт лишний шум и усложняет последующее ревью.
-
+- Ничто не повышает права и не вызывает UAC; привилегированное отвечает `ErrorKind::Permission`, а UI
+  показывает функцию недоступной, а не работающей.
+- Состояние «подключено» и любой успех — только наблюдённые; «не проверено» — отдельное состояние.
+- Ключи, UUID, пароли и ссылки подписок не пишутся в логи, на диск открытым текстом (только DPAPI) и в
+  архив диагностики.
+- Конфигурацию sing-box строит только `profiles::emit_singbox`, Xray — только `engine::xray_config`.
+- У изменяемого общего состояния один владелец (актор: `mpsc` / `watch` / `broadcast`) или короткая
+  блокировка `parking_lot`, не удерживаемая через `.await`.
+- Текст для пользователя — только ключи `Msg` с переводами ru и en; логи — на английском.
+- Тесты не слушают адреса вне loopback; `elevated_*` и `system_*` запускает только CI.

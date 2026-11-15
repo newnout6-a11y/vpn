@@ -1,0 +1,7 @@
+{
+  "engine": {
+    "config": {
+      "invalid": "Could not build the sing-box configuration. Details are in the log."
+    }
+  }
+}

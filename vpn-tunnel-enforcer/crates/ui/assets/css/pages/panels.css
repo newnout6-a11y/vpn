@@ -1,0 +1,36 @@
+/* ui-panels — fixes to the reference panel row; everything else is swiss.css verbatim.
+   Loaded after swiss / base / utilities / widgets, scoped to the proxy picker. */
+
+/* D-27: the open list escapes the panel's `overflow: hidden`. It is fixed-positioned and
+   anchored to the trigger (same box as the old absolute list: trigger bottom + mt-1, trigger
+   width) and flips above the trigger when the window has no room below. Fixed positioning
+   needs no ancestor with transform / filter / contain (the shell keeps page ancestors free of
+   them, D-22). */
+.c-swiss .swiss-proxy-select [role='combobox'] { anchor-name: --vpnte-proxy-picker; }
+.c-swiss .swiss-proxy-select [role='listbox'] {
+  position: fixed;
+  position-anchor: --vpnte-proxy-picker;
+  top: anchor(bottom);
+  left: anchor(left);
+  width: anchor-size(width);
+  position-try-fallbacks: flip-block;
+  animation: vpnte-picker-in 0.12s ease-out both;
+}
+@keyframes vpnte-picker-in {
+  from { opacity: 0; transform: translateY(-3px); }
+}
+
+/* D-16: Tailwind generated no CSS for opacity modifiers on var() colours, so the old picker
+   showed neither the hovered / keyboard-active row nor the selected tint. The intended
+   colours, for exactly the classes the markup carries. */
+.c-swiss .swiss-proxy-select .bg-\[var\(--color-border\)\]\/50,
+.c-swiss .swiss-proxy-select .hover\:bg-\[var\(--color-border\)\]\/50:hover {
+  background-color: color-mix(in srgb, var(--color-border) 50%, transparent);
+}
+.c-swiss .swiss-proxy-select .bg-\[var\(--color-accent\)\]\/10 {
+  background-color: color-mix(in srgb, var(--color-accent) 10%, transparent);
+}
+
+/* The server rows' health cell is 64 px wide; a longer word («unchecked» in English) squeezed
+   the dot into a bar. The proxy rows' dots carry `shrink-0` for the same reason. */
+.c-swiss .swiss-server-health .swiss-health-dot { flex-shrink: 0; }

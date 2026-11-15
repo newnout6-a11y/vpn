@@ -1,0 +1,35 @@
+{
+  "tunnel": {
+    "runtime": {
+      "tunUnavailable": "Tunnel mode needs the helper service. Proxy mode works without it.",
+      "proxy": {
+        "strictUnavailable": "“Always” works in Tunnel mode only: in Proxy mode the kill switch pauses on a drop.",
+        "notAccepting": "The engine's local proxy does not accept connections on port {{port}}."
+      },
+      "watchdog": {
+        "proxyMode": {
+          "proxyDown": "Proxy {{addr}} does not respond; the internet is paused until it answers.",
+          "upstreamDown": "The VPN through server «{{name}}» does not respond. Check the connection or choose another server.",
+          "slotExited": "The server's xray-core exited; restarting it."
+        }
+      }
+    },
+    "lifecycle": {
+      "notice": {
+        "softConnected": {
+          "title": "VPN connected (Proxy mode)",
+          "body": "Browsers and most programs go through the VPN.",
+          "bodyListed": "Selected apps that use the system proxy go through the VPN."
+        },
+        "softResumeFailed": {
+          "title": "System proxy not restored",
+          "body": "The VPN engine runs again, but the system proxy could not be pointed at it: programs connect directly, without the VPN. Turn protection off and on again."
+        },
+        "softRestored": {
+          "title": "The VPN stopped",
+          "body": "Programs connect directly, without the VPN."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,186 @@
+{
+  "probes": {
+    "live": {
+      "profileNotFound": "Профиль не найден",
+      "shuttingDown": "Приложение завершает работу: проверка не запущена",
+      "batch": {
+        "size": "Пакетная проверка принимает от 1 до {{max}} профилей",
+        "notEligible": "Профиль не найден, выключен или удалён из подписки"
+      },
+      "history": {
+        "invalidRow": "Результат проверки повреждён и не сохранён"
+      },
+      "engine": {
+        "noProbePort": "Проверка отдельного рукопожатия пропущена: у активного туннеля нет доступного локального SOCKS-порта.",
+        "handshakeFailed": "Рукопожатие завершилось ошибкой ({{reason}})",
+        "noProfile": "Профиль не выбран: проверка через туннель не выполнялась"
+      },
+      "egress": {
+        "discrepancy": "Расхождение IP: {{first}} vs {{second}}"
+      },
+      "media": {
+        "unreachable": "Серверы Twitch HLS / CDN недоступны через данный туннель.",
+        "risk": "Обнаружен риск ошибки Twitch #2000: TCP-only профиль не блокирует QUIC (UDP/443).",
+        "guarded": "HLS медиапотоки защищены. Защита от QUIC blackhole активна (UDP/443 guard блокирует QUIC, fallback на HTTPS/TCP).",
+        "udp": "HLS медиапотоки доступны. Профиль поддерживает UDP/QUIC."
+      },
+      "throughput": {
+        "stable": "Поток стабилен в пределах короткого диагностического зонда.",
+        "unstable": "Поток идёт неравномерно: сравните min/max, stalls и максимальную паузу с другими профилями.",
+        "partial": "Получены не все короткие пробы: {{error}}. Сравните доступные min/max и stalls с другими профилями."
+      },
+      "split": {
+        "disabled": "Split tunneling выключен: весь трафик следует обычному default route.",
+        "duplicates": "Одинаковые process_name встречаются в правилах: {{names}}.",
+        "direct": "Прямой маршрут назначен {{names}} process_name и {{paths}} путям приложений; остальные приложения идут через proxy-out.",
+        "none": "Явных direct-правил нет: приложения идут через proxy-out."
+      },
+      "finding": {
+        "privateTarget": {
+          "title": "Сервер в частной сети",
+          "detail": "Адрес {{ip}} относится к частной сети; результаты отражают только локальный путь."
+        },
+        "dnsMultiIp": {
+          "title": "Несколько IP-адресов в DNS",
+          "detail": "Хост резолвится в {{count}} адресов: {{ips}}"
+        },
+        "dnsChanged": {
+          "title": "Изменились IP-адреса DNS",
+          "detail": "IP изменился с {{previous}} на {{current}}"
+        },
+        "tlsExpired": {
+          "title": "TLS сертификат истекает или истёк",
+          "detail": "Сертификат действителен ещё {{days}} дн. (до {{validTo}})"
+        },
+        "tlsExpiring": {
+          "title": "TLS сертификат скоро истекает",
+          "detail": "Сертификат истекает через {{days}} дн."
+        },
+        "tlsSanMismatch": {
+          "title": "Имя хоста отсутствует в SAN сертификата",
+          "detail": "Сертификат выдан для [{{names}}], проверялся {{host}}"
+        },
+        "tlsFingerprintChanged": {
+          "title": "Fingerprint TLS сертификата изменился",
+          "detail": "Отпечаток сертификата изменился с момента предыдущей проверки"
+        },
+        "tlsUntrusted": {
+          "title": "Недоверенный TLS-сертификат",
+          "detail": "Система не подтвердила цепочку сертификата ({{error}}); для VPN-серверов с самоподписанным сертификатом это нормально."
+        },
+        "httpRedirect": {
+          "title": "HTTP перенаправление",
+          "detail": "Ответ HTTP {{code}} перенаправляет на {{location}}"
+        },
+        "httpServerError": {
+          "title": "Сервер вернул ошибку HTTP 5xx",
+          "detail": "HTTP статус: {{code}}"
+        },
+        "portOpen": {
+          "title": "Обнаружены открытые порты",
+          "detail": "Открытые порты: {{ports}}"
+        },
+        "tcpUnreachable": {
+          "title": "Сервер недоступен по TCP",
+          "detail": "Не удалось подключиться к {{host}}:{{port}}: {{error}}"
+        },
+        "packetLossHigh": {
+          "title": "Высокая доля отказов TCP подключений",
+          "detail": "Не удалось установить соединение в {{pct}}% попыток"
+        },
+        "packetLoss": {
+          "title": "Отказы TCP подключений при проверке задержки",
+          "detail": "Не удалось установить соединение в {{pct}}% попыток"
+        },
+        "latencyCritical": {
+          "title": "Критически высокая задержка",
+          "detail": "Средний RTT составляет {{avg}} ms"
+        },
+        "latencyHigh": {
+          "title": "Повышенная задержка до сервера",
+          "detail": "Средний RTT: {{avg}} ms"
+        },
+        "jitterHigh": {
+          "title": "Нестабильное соединение (высокий джиттер)",
+          "detail": "Флуктуация RTT (jitter): {{jitter}} ms"
+        },
+        "asnChanged": {
+          "title": "Сменилась автономная система (ASN)",
+          "detail": "ASN изменился с {{previous}} на {{current}} ({{org}})"
+        },
+        "cidrShared": {
+          "title": "Общая подсеть с другими серверами",
+          "detail": "Сервер находится в одной /24 подсети с: {{names}}"
+        },
+        "egressCountryMismatch": {
+          "title": "Несовпадение страны выхода и сервера",
+          "detail": "Egress трафика: {{egress}}, страна сервера: {{endpoint}}"
+        },
+        "dnsResolverDiscrepancy": {
+          "title": "Расхождение ответов DNS резолверов"
+        },
+        "handshakeFailed": {
+          "title": "Сбой рукопожатия туннеля",
+          "detail": "Протокол {{protocol}} не прошёл проверку: {{error}}"
+        },
+        "egressFailed": {
+          "title": "Сбой проверки выхода в интернет (Egress)",
+          "detail": "Рефлекторы не подтвердили выход через туннель",
+          "detailError": "Рефлекторы не подтвердили выход через туннель: {{error}}"
+        },
+        "egressPartial": {
+          "title": "Частичное подтверждение выхода в интернет",
+          "detail": "Один из рефлекторов выхода не ответил или обнаружено расхождение",
+          "detailError": "Один из рефлекторов выхода не ответил: {{error}}"
+        },
+        "egressDiffers": {
+          "title": "Выходной IP отличается от IP подключения",
+          "detail": "Endpoint: {{endpoint}}, фактический Egress: {{exit}} ({{country}})"
+        },
+        "pmtuBlackhole": {
+          "title": "Подозрение на PMTU Blackhole",
+          "detail": "Большие пакеты отбрасываются без ICMP ответа"
+        },
+        "lowPmtu": {
+          "title": "Низкий MTU канала",
+          "detail": "Обнаружен MTU {{pmtu}} байт. Это может приводить к повышенной фрагментации пакетов."
+        },
+        "throughputFailed": {
+          "title": "Не удалось измерить поток через профиль",
+          "detail": "HTTPS-зонд скорости не завершился.",
+          "detailError": "HTTPS-зонд скорости не завершился: {{error}}"
+        },
+        "throughputUnstable": {
+          "title": "Скорость через сервер нестабильна",
+          "detail": "Разброс коротких проб {{spread}}%, stalls: {{stalls}}, максимальная пауза: {{gap}} ms."
+        },
+        "throughputDegraded": {
+          "title": "Профиль стал заметно медленнее предыдущей проверки",
+          "detail": "Медианная скорость снизилась с {{previous}} до {{current}} Mbps."
+        },
+        "twitchRisk": {
+          "title": "Риск ошибки Twitch #2000 (QUIC Blackhole)",
+          "detail": "VPN-профиль использует TCP-транспорт без поддержки UDP, но UDP/443 (QUIC) не заблокирован. Браузер будет пытаться загружать медиапотоки по HTTP/3, что вызовет тайм-аут видео и ошибку Twitch #2000."
+        },
+        "twitchOk": {
+          "title": "Медиапотоки Twitch HLS защищены",
+          "detail": "Доставка HLS видеопотоков подтверждена. Защита от QUIC blackhole активна, браузер корректно использует HTTPS/TCP."
+        },
+        "twitchUnreachable": {
+          "title": "Серверы Twitch HLS недоступны",
+          "detail": "Не удалось установить соединение с серверами доставки видео Twitch через туннель.",
+          "detailError": "Не удалось установить соединение с серверами доставки видео Twitch через туннель: {{error}}"
+        },
+        "splitConflict": {
+          "title": "Пересечение правил split tunneling",
+          "detail": "Один process_name попал в несколько маршрутизирующих правил."
+        },
+        "splitFailed": {
+          "title": "Не удалось прочитать split tunneling",
+          "detail": "Состояние process-based routing неизвестно.",
+          "detailError": "Состояние process-based routing неизвестно: {{error}}"
+        }
+      }
+    }
+  }
+}

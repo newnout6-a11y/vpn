@@ -1,0 +1,198 @@
+# Engines watch (research/updates.md §4.2.2): every 6 hours, look for a new sing-box (same minor as the pin)
+# and a new Xray through the `releases/latest` redirect (no API call), verify the archive (sing-box: GitHub
+# attestation of its own build; Xray: its .dgst file and GitHub's asset digest), pin it in engines.toml, run our
+# tests with it (including the elevated ones: the Windows runner is an administrator), then (a) open a PR for
+# engines.toml (the next app release ships it) and (b) after the owner's Approve in the Environment `release`,
+# sign a feed that lists it, so installed apps offer it. Without the signing secrets (b) ends with a notice.
+name: Engines watch
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engines-watch
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  RUST_TOOLCHAIN: '1.99.1'
+
+jobs:
+  detect:
+    name: New engine releases
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      singbox: ${{ steps.find.outputs.singbox }}
+      xray: ${{ steps.find.outputs.xray }}
+      changed: ${{ steps.find.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: find
+        shell: bash
+        working-directory: vpn-tunnel-enforcer
+        run: |
+          pinned() { awk -v id="id = \"$1\"" '$0 == id {f=1} f && /^version = / {gsub(/"/, "", $3); print $3; exit}' resources/engines.toml; }
+          latest() { curl -fsSI "https://github.com/$1/releases/latest" | tr -d '\r' | awk 'tolower($1) == "location:" {print $2}' | sed 's#.*/tag/v##'; }
+          newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$2" ]; }
+          sb_pin=$(pinned sing-box); sb=$(latest SagerNet/sing-box)
+          xr_pin=$(pinned xray); xr=$(latest XTLS/Xray-core)
+          # sing-box changes its config schema between minor versions: only the pinned minor is taken.
+          if [ "${sb%.*}" = "${sb_pin%.*}" ] && newer "$sb_pin" "$sb"; then echo "singbox=$sb" >> "$GITHUB_OUTPUT"; fi
+          if newer "$xr_pin" "$xr"; then echo "xray=$xr" >> "$GITHUB_OUTPUT"; fi
+          if { [ "${sb%.*}" = "${sb_pin%.*}" ] && newer "$sb_pin" "$sb"; } || newer "$xr_pin" "$xr"; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sing-box pinned $sb_pin, latest $sb; Xray pinned $xr_pin, latest $xr"
+
+  test:
+    name: Verify and test the new engines
+    needs: detect
+    if: needs.detect.outputs.changed == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+        working-directory: vpn-tunnel-enforcer
+    env:
+      SB: ${{ needs.detect.outputs.singbox }}
+      XR: ${{ needs.detect.outputs.xray }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Download and verify the archives
+        run: |
+          mkdir -p ../watch
+          if [ -n "$SB" ]; then
+            curl -fsSLo ../watch/sing-box.zip "https://github.com/SagerNet/sing-box/releases/download/v$SB/sing-box-$SB-windows-amd64.zip"
+            gh attestation verify ../watch/sing-box.zip --repo SagerNet/sing-box
+          fi
+          if [ -n "$XR" ]; then
+            base="https://github.com/XTLS/Xray-core/releases/download/v$XR/Xray-windows-64.zip"
+            curl -fsSLo ../watch/xray.zip "$base"
+            curl -fsSLo ../watch/xray.zip.dgst "$base.dgst"
+            sha=$(sha256sum ../watch/xray.zip | cut -d' ' -f1)
+            grep -Eiq "SHA2?-256= *$sha" ../watch/xray.zip.dgst || { echo "Xray archive does not match its .dgst" >&2; exit 1; }
+            digest=$(gh api "repos/XTLS/Xray-core/releases/tags/v$XR" --jq '.assets[] | select(.name == "Xray-windows-64.zip") | .digest')
+            [ "$digest" = "sha256:$sha" ] || { echo "Xray archive does not match GitHub's digest ($digest)" >&2; exit 1; }
+          fi
+      - name: Pin them in engines.toml
+        run: python ../.github/scripts/pin-engines.py resources/engines.toml ../watch
+      - name: Fetch the pinned engines (every hash checked)
+        run: cargo xtask engines
+      - name: Tests with the new engines
+        run: cargo test --workspace --locked --no-fail-fast
+      - name: Elevated tests (TUN and the pin check; the runner is an administrator)
+        run: cargo test --workspace --locked --no-fail-fast -- --ignored elevated_ --test-threads=1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: engines-toml
+          path: vpn-tunnel-enforcer/resources/engines.toml
+          if-no-files-found: error
+
+  pull-request:
+    name: PR for engines.toml
+    needs: [detect, test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SB: ${{ needs.detect.outputs.singbox }}
+      XR: ${{ needs.detect.outputs.xray }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: engines-toml
+          path: vpn-tunnel-enforcer/resources
+      - shell: bash
+        run: |
+          title="engines:${SB:+ sing-box $SB}${XR:+ xray $XR}"
+          branch="engines/${SB:+sing-box-$SB}${SB:+${XR:+-}}${XR:+xray-$XR}"
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads "$remote" "$branch" >/dev/null; then
+            echo "::notice::$branch already exists"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "$title" -m "Verified (attestation / .dgst + GitHub digest) and tested in run $GITHUB_RUN_ID."
+          git push "$remote" "$branch"
+          gh pr create --head "$branch" --title "$title" --body "Engines watch run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+  sign-feed:
+    name: Signed feed with the new engines
+    needs: [detect, test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: release # required reviewer: the owner
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+        working-directory: vpn-tunnel-enforcer
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: engines-toml
+          path: watch
+      - name: Signing key and a published feed present
+        id: ready
+        env:
+          KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          remote="https://github.com/${GITHUB_REPOSITORY}.git"
+          if [ -z "$KEY" ]; then
+            echo "::notice::UPDATE_SIGNING_KEY is not set in the Environment 'release': no feed signed."
+          elif ! git ls-remote --exit-code --heads "$remote" update-feed >/dev/null; then
+            echo "::notice::No update-feed branch yet: the first app release publishes the feed."
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Toolchain
+        if: steps.ready.outputs.ok == 'true'
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Sign and publish
+        if: steps.ready.outputs.ok == 'true'
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          UPDATE_SIGNING_PASSWORD: ${{ secrets.UPDATE_SIGNING_PASSWORD }}
+        run: |
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          rm -rf ../feed-branch
+          git clone --quiet --depth 1 --branch update-feed "$remote" ../feed-branch
+          cargo xtask feed --base ../feed-branch/update.json --engines ../watch/engines.toml --out target/feed
+          cp target/feed/update.json target/feed/update.json.minisig ../feed-branch/
+          cd ../feed-branch
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -qam "feed: engines from run $GITHUB_RUN_ID"
+          git push --quiet "$remote" HEAD:update-feed

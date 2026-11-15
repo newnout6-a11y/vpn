@@ -1,0 +1,40 @@
+/* speedtest.css — the Speed test page (vpnte_ui::speedtest) in the «Пломба» language: swiss.css
+ * tokens only (--paper --ink --mute --rule --rule-strong --signal --on-signal --signal-ink),
+ * square corners, hairlines, mono captions. The big readouts follow the dashboard's traffic
+ * figures; panels, buttons, the progress bar, the table and badges are the shared widgets. */
+
+.st { display: flex; min-height: 100%; flex-direction: column; gap: 20px; padding-bottom: 24px; color: var(--ink); container: st / inline-size; }
+.st > .w-section-head { margin-bottom: 0; }
+
+.st-notice { display: flex; align-items: baseline; gap: 8px; border: 1px solid var(--signal); background: var(--paper); padding: 12px 16px; font-size: 13px; font-weight: 500; line-height: 1.45; }
+.st-notice::before { content: ''; width: 8px; height: 8px; flex-shrink: 0; background: var(--signal); }
+
+/* ── Readouts ────────────────────────────────────────────────────────── */
+.st-figures { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--rule); }
+.st-figure { min-width: 0; padding: 16px 20px; }
+.st-figure + .st-figure { border-left: 1px solid var(--rule); }
+.st-big { display: flex; min-width: 0; align-items: baseline; gap: 8px; margin-top: 8px; }
+.st-value { font-size: 48px; font-weight: 600; line-height: 1; letter-spacing: -0.05em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.st-unit { font-size: 13px; font-weight: 500; color: var(--mute); white-space: nowrap; }
+.st-big.is-empty .st-value, .st-figures.is-dim .st-value { color: var(--mute); }
+@container st (max-width: 640px) { .st-value { font-size: 36px; } .st-figure { padding: 16px; } }
+
+.st-meta { padding: 12px 20px 0; font-size: 12px; color: var(--mute); overflow-wrap: anywhere; }
+.st-note { margin: 12px 20px 0; border-left: 2px solid var(--rule-strong); padding-left: 12px; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.st-note[data-tone='warn'] { border-left-color: var(--signal); }
+.st-note[data-tone='fail'] { border-left-color: var(--signal); color: var(--signal-ink); font-weight: 600; }
+.st-note[data-tone='unknown'] { border-left-style: dashed; border-left-color: var(--mute); color: var(--mute); }
+
+/* ── Run ─────────────────────────────────────────────────────────────── */
+.st-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; padding: 16px 20px; }
+.st-progress { display: flex; min-width: 220px; flex: 1 1 260px; flex-direction: column; gap: 8px; }
+.st-phase { font-size: 12px; color: var(--mute); }
+.st-error { display: flex; align-items: baseline; gap: 8px; margin: -4px 20px 16px; font-size: 13px; font-weight: 500; line-height: 1.45; color: var(--signal-ink); }
+.st-error::before { content: ''; width: 8px; height: 8px; flex-shrink: 0; background: var(--signal); }
+
+/* ── History ─────────────────────────────────────────────────────────── */
+.st-history-note { margin: 0; padding: 12px 20px; }
+.st-row .w-td { font-size: 13px; white-space: nowrap; }
+.st-server { display: flex; min-width: 0; align-items: center; gap: 8px; }
+.st-server .w-trunc { min-width: 0; flex: 1 1 auto; }
+.st-server .w-badge { flex-shrink: 0; }

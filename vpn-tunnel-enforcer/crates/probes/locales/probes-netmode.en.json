@@ -1,0 +1,76 @@
+{
+  "probes": {
+    "keyHealth": {
+      "reason": {
+        "connectionRefused": "Connection refused: the key's port answered with a reset (from the server or from a filter on the way)"
+      }
+    },
+    "verdict": {
+      "refused": "Connection refused: the connection to the key's port was reset. The reset may come from the server or from a filter on the way"
+    },
+    "netmode": {
+      "mode": {
+        "whitelist": "Only whitelisted Russian sites are reachable",
+        "udpBlocked": "UDP is blocked",
+        "dohBlocked": "Encrypted DNS (DoH) is blocked",
+        "serverBlocked": "A server's IP address is blocked",
+        "freeze": "Transfers freeze after 16 KB"
+      },
+      "advice": {
+        "whitelist": "Foreign servers cannot be reached with any protocol. Only a server whose entry is in a whitelisted Russian range (a cascade) can work",
+        "udpBlocked": "Neither QUIC nor other UDP passes: Hysteria2, TUIC and WireGuard will not work here, choose TCP servers (VLESS Reality, Trojan). The app prefers them on its own",
+        "dohBlocked": "The app falls back to Yandex DoH and DNS over TCP; connecting is not affected",
+        "serverBlocked": "Changing the port or the protocol will not help: choose a server with another IP address",
+        "freeze": "The network cuts transfers to foreign hosting after the first ~16 KB: choose XHTTP or servers at other hosting providers"
+      },
+      "summary": {
+        "open": "No restrictions found: foreign sites, transfers past 16 KB, QUIC and UDP work",
+        "offline": "No internet access: none of the reference sites answered",
+        "notVerified": "No restriction confirmed, but not every check passed"
+      },
+      "step": {
+        "dns": {
+          "ok": "The system DNS and DoH answer",
+          "dohForeignCut": "The system DNS answers, DoH to a foreign resolver does not pass, Yandex DoH works",
+          "dohCut": "The system DNS answers, DoH does not pass",
+          "systemFailed": "The system DNS does not answer, DoH works",
+          "failed": "DNS does not answer",
+          "notRun": "Not checked"
+        },
+        "tcp": "Connection: Russian sites {{ru}} of {{ruTotal}}, foreign {{foreign}} of {{foreignTotal}}",
+        "tls": "TLS handshake: Russian sites {{ru}} of {{ruTotal}}, foreign {{foreign}} of {{foreignTotal}}",
+        "bytes": {
+          "ok": "The whole transfer arrived ({{kb}} KB)",
+          "frozen": "The transfer froze at {{kb}} KB — the 16 KB freeze signature",
+          "stalled": "The transfer froze at {{kb}} KB",
+          "noData": "No data arrived",
+          "failed": "The transfer broke off at {{kb}} KB",
+          "notRun": "Not checked: foreign sites are unreachable"
+        },
+        "udp": {
+          "ok": "UDP passes: QUIC on port 443 and STUN on other ports answer",
+          "blocked": "UDP does not pass: neither QUIC on port 443 nor STUN on other ports answers",
+          "notRun": "Not checked",
+          "unclear": "UDP: the answers are inconclusive",
+          "quicCut": "UDP passes, but QUIC on port 443 gets no answer: Hysteria2 and TUIC on port 443 may not connect (Salamander obfuscation or another port helps)",
+          "quicOnly": "QUIC on port 443 answers, UDP on other ports (STUN) does not"
+        },
+        "servers": "Your servers: {{answered}} of {{total}} answer, {{banned}} blocked",
+        "dnsTun": {
+          "ok": "DoH answers past the tunnel; the system's DNS queries are answered by our tunnel's resolver",
+          "dohForeignCut": "DoH to a foreign resolver does not pass past the tunnel, Yandex DoH works; the system's DNS queries are answered by our tunnel's resolver",
+          "dohCut": "DoH does not pass past the tunnel; the system's DNS queries are answered by our tunnel's resolver",
+          "systemFailed": "Our tunnel's resolver did not answer the system's DNS query; DoH past the tunnel works",
+          "failed": "Neither our tunnel's resolver nor DoH past the tunnel answers",
+          "notRun": "Not checked"
+        }
+      },
+      "canary": {
+        "captured": "The tunnel answers the system's DNS queries",
+        "escaped": "Something other than the tunnel answers the system's DNS queries: a DNS leak is possible",
+        "noAnswer": "The system DNS did not answer: DNS capture not verified",
+        "notCaptured": "Proxy mode does not capture DNS: programs ask the system DNS directly"
+      }
+    }
+  }
+}

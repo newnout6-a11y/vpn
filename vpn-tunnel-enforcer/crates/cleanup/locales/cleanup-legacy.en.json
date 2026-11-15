@@ -1,0 +1,68 @@
+{
+  "cleanup": {
+    "legacy": {
+      "needsAdmin": "Cleaning up after the old version needs the helper service.",
+      "notice": {
+        "firewallResetTitle": "Windows Firewall unblocked",
+        "firewallReset": "The old strict mode had set Windows Firewall to block all outgoing traffic. It has been reset to Allow; protection now comes from the app's own filters.",
+        "firewallAllowAllTitle": "Windows Firewall reset",
+        "firewallAllowAll": "Old kill switch rules were found without a record of the original settings. Outgoing traffic is allowed again in every Windows Firewall profile; check the firewall settings if you had changed them yourself.",
+        "doneTitle": "Old version cleaned up",
+        "failedTitle": "Cleanup after the old version is incomplete",
+        "summary": "Cleaned up: {{changed}}, failed: {{failed}}. Details are on the Maintenance page."
+      },
+      "step": {
+        "processes": {
+          "done": "Old engine processes are no longer running",
+          "skipped": "Old engine processes were not checked",
+          "failed": "Some old engine processes could not be stopped"
+        },
+        "journals": {
+          "done": "Old recovery journals were read",
+          "skipped": "Untrusted or damaged recovery journals were ignored",
+          "failed": "Old recovery journals could not be read"
+        },
+        "firewall": {
+          "done": "Windows Firewall settings of the old kill switch are cleaned up",
+          "skipped": "Windows Firewall was left as is",
+          "failed": "Windows Firewall settings of the old kill switch could not be cleaned up"
+        },
+        "singTunRules": {
+          "done": "Windows Firewall rules of old engine copies are removed",
+          "skipped": "Windows Firewall rules of old engine copies were left as is",
+          "failed": "Windows Firewall rules of old engine copies could not be removed"
+        },
+        "legacyWfp": {
+          "done": "Old IPv6 filters are removed",
+          "skipped": "A foreign WFP sublayer with the old identifier was left as is",
+          "failed": "Old IPv6 filters could not be removed"
+        },
+        "adapters": {
+          "done": "Network adapter settings are restored",
+          "skipped": "Network adapter settings were left as is",
+          "failed": "Some network adapter settings could not be restored"
+        },
+        "dnsPolicy": {
+          "done": "DNS client policies are restored",
+          "skipped": "DNS client policies without a valid record were left as is",
+          "failed": "DNS client policies could not be restored"
+        },
+        "tunAdapter": {
+          "done": "Nothing to do for the old virtual adapter",
+          "skipped": "A disabled virtual adapter of the old version remains: remove it in Device Manager",
+          "failed": "The old virtual adapter could not be checked"
+        },
+        "tasks": {
+          "done": "Old boot-recovery tasks are removed",
+          "skipped": "A task with the old name that does not belong to the app was kept",
+          "failed": "Old boot-recovery tasks could not be removed"
+        },
+        "files": {
+          "done": "Old service files are removed",
+          "skipped": "Old service files were kept: their folder is not trusted",
+          "failed": "Some old service files could not be deleted"
+        }
+      }
+    }
+  }
+}

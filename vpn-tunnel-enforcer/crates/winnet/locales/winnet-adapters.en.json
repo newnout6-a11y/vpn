@@ -1,0 +1,9 @@
+{
+  "winnet": {
+    "adapters": {
+      "tunTimeout": "The tunnel interface did not come up; the connection was cancelled.",
+      "aliasExhausted": "Could not pick a name for the TUN adapter: “Ethernet 5” … “Ethernet 12” and “VPNTE-TUN” are all taken by other network connections. Rename or remove the unused connections and try again.",
+      "foreignTunConflict": "Another system tunnel is already active. Turn off its TUN mode and connect again."
+    }
+  }
+}

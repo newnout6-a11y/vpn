@@ -1,0 +1,7 @@
+{
+  "probes": {
+    "keyHealth": {
+      "labNotProbed": "An AmneziaWG key is checked by connecting (the mihomo lab engine): it gets no separate key check."
+    }
+  }
+}

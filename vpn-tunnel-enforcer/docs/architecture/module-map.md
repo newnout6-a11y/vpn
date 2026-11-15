@@ -1,68 +1,68 @@
-# Карта модулей
+# Карта крейтов
 
-## Дерево исходников
+Рабочее пространство `vpn-tunnel-enforcer/Cargo.toml`, крейты `crates/<имя>` (пакет `vpnte-<имя>`, путь Rust
+`vpnte_<имя>`). Подробный публичный API — `crates/<имя>/API.md`.
 
-```text
-src/
-├── main/                  Electron main и Windows/VPN домены
-│   ├── index.ts            bootstrap, app lifecycle, core IPC wiring
-│   ├── tunController.ts    start/stop/recovery TUN runtime
-│   ├── tunAdapter.ts       Wintun adapter operations
-│   ├── systemNetwork.ts    routes, DNS baseline, rollback
-│   ├── firewallKillSwitch.ts firewall policy and recovery
-│   ├── physicalAdapterLockdown.ts adapter DNS/IPv6 lockdown
-│   ├── vpnProfiles.ts       URI/config parsing and normalization
-│   ├── serverPicker.ts      profile selection, import/export, migrations
-│   ├── serverGroups.ts      subscription groups and refresh
-│   ├── externalProxy.ts     isolated loopback proxy instances
-│   ├── diagnostics*.ts      snapshots, leak checks, exports, forensics
-│   └── <feature>.ts         one feature service plus its IPC registration
-├── preload/                validated renderer-to-main contract
-│   └── index.ts             ElectronAPI surface and argument assertions
-├── renderer/               React UI only
-│   ├── App.tsx              navigation, global state, app-level effects
-│   ├── pages/               route-level screens and page data loading
-│   ├── components/          reusable product components
-│   ├── design-system/       Mac* primitives and visual tokens
-│   ├── providers/           React context providers
-│   ├── store.ts             Zustand application state
-│   └── i18n/                translations and i18n setup
-└── shared/                 types/constants used by more than one process
+## Слои и зависимости
+
+Зависимости только сверху вниз и никогда обратно (`crates/CONTRACT.md` §2). Ниже — фактические
+`[dependencies]` из `Cargo.toml` (12.11.2026); контракт разрешает ещё `tunnel` → `servers` и `proxies` →
+`winnet`, но они не используются.
+
+```
+base        общий контракт: AppError, Msg, общие перечисления, i18n, HTTP/TLS        -
+core        папки, Store<T>, Secret (DPAPI), настройки, редактирование, логи, сеть    -> base
+winnet      Win32: адаптеры, процессы, WFP, реестр, системный прокси, автозапуск ...  -> base
+profiles    модель профиля, импорт, генератор sing-box, граф Xray, экспорт           -> base
+view        чистая логика стартовой страницы и маскота                              -> base
+ui          интерфейс Dioxus: окно, оболочка, страницы, трей                         -> base, view
+servers     список серверов, группы, подписки                                       -> base, core, profiles
+engine      конфигурации и процессы sing-box / Xray, Clash API, маршрутизация, DNS  -> base, core, winnet, profiles
+forensics   статистика, история доменов, pktmon + ETW, архив диагностики            -> base, core, winnet
+automation  расписание, ротация, AutoPilot, обход, настройки «Прокси», защита       -> base, core, winnet
+probes      IP / утечки, диагностика, доступность, скорость, пинги, живая проверка  -> base, core, winnet, profiles, engine
+tunnel      актор подключения, захват, жизненный цикл, история                     -> base, core, winnet, profiles, engine
+proxies     слоты внешних прокси, API управления, vpnte-proxy.exe                   -> base, core, profiles, engine
+cleanup     одноразовое удаление следов старой версии                               -> base, core, winnet
+app         бинарник: запуск, Backend, реализации XxxApi                            -> все
 ```
 
-## Main-домены
+Чего нет в зависимостях, крейт получает трейтом или простыми данными: например, `automation` просит
+подключения через свой `Coordinator`, `tunnel` берёт профили через `ProfileSource`, а реализует их `app`.
 
-| Домен | Основные файлы | Граница ответственности |
-| --- | --- | --- |
-| Tunnel runtime | `tunController.ts`, `tunAdapter.ts`, `connectionPlanner.ts`, `managedChildProcess.ts`, `singBoxEndpoint.ts` | Создание и остановка sing-box/TUN, процессные recovery-сценарии; `singBoxEndpoint.ts` переводит WireGuard-профиль в `endpoints` sing-box 1.13 |
-| Native reads | `native/nativeHost.ts`, `native/hostClient.ts`, `native/nativeOps.ts`, `native/ipHelperReads.ts`, `native/winInet.ts`, `native/physicalAdapterNative.ts` | Низкоуровневые чтения сети (koffi: iphlpapi, реестр, WinINet) в отдельном `utilityProcess`; фатальная ошибка koffi убивает только хост, любой сбой — откат на PowerShell; `koffi` в основном процессе запрещён |
-| Elevated helper | `elevatedPsHelper.ts`, `admin.ts`, `runtimeDirSecurity.ts`, `runtimeAclInspection.ts` | Постоянный elevated PowerShell под политиками команд (`firewall-killswitch`, `physical-adapter-lockdown`, `wfp-ipv6`, `runtime-acl`); создание защищённого runtime-каталога идёт только через него |
-| Network safety | `systemNetwork.ts`, `firewallKillSwitch.ts`, `physicalAdapterLockdown.ts`, `browserHardening.ts` | Windows baseline, kill-switch, DNS/IPv6 и rollback |
-| Profiles | `vpnProfiles.ts`, `serverPicker.ts`, `serverGroups.ts`, `serverProbe.ts`, `vpnInspectionCache.ts` | Нормализация ключей, группы, выбор, health checks, миграции; `vpnInspectionCache.ts` — что проверка ключа вправе сохранить (только кэш, не `directVpnInput`) |
-| Routing | `smartRoute.ts`, `ruleSetManager.ts`, `domainRouting.ts`, `dnsProfiles.ts`, `splitTunneling.ts`, `splitTunnelPath.ts` | split routing, rule sets, DNS profiles и пользовательские правила; приложения в обход идут по полному пути (`splitTunnelPath.ts`), счётчики попаданий доменных правил — `createHitRecorder` в `domainRouting.ts` |
-| Observability | `appLogger.ts`, `systemDiagnostics.ts`, `leakDiagnostics.ts`, `trafficForensics.ts`, `systemSnapshot.ts` | Логи, диагностика, leak tests, packet forensics и экспорт |
-| Automation | `scheduler.ts`, `profileRotation.ts`, `autoPilot.ts`, `adaptiveBypass.ts` | Планировщик, ротация профилей и автоматический recovery/выбор |
-| UI support | `notifications.ts`, `themeManager.ts`, `i18n.ts`, `configManager.ts` | Уведомления, тема, локализация и импорт/экспорт настроек |
+## Модули
 
-## IPC-домены
+| Крейт | Модули `src/` |
+| --- | --- |
+| `base` | `error`, `msg`, `types`, `i18n`, `http` |
+| `core` | `paths`, `store`, `secret` + `dpapi`, `settings`, `redact`, `logging`, `net`, `resolve`, `socks5`, `ops`, `legacy` |
+| `winnet` | `adapters`, `process`, `counters`, `icmp`, `wfp`, `registry`, `env`, `sysproxy`, `elevation`, `autostart`, `single_instance`, `clipboard`, `power`, `shell`, `toast` |
+| `profiles` | `model`, `uri`, `json`, `clash`, `wg_ini`, `deeplink`, `text`, `legacy`, `emit_singbox`, `xray_native`, `export`, `identity`, `caps`, `countries`, `device` |
+| `view` | `phase`, `labels`, `identity`, `traffic`, `fmt`, `mascot`, `swiss` |
+| `ui` | `shell`, `dashboard`, `servers`, `settings`, `split_tunnel`, `traffic_history`, `logs`, `maintenance`, `availability`, `speedtest`, `schedule`, `wizard`, `panels`, `tray`, `mascot`, `widgets`, `theme`; `assets/` (CSS, шрифты, локали); `src/bin/demo_*` |
+| `servers` | `model`, `store`, `parse`, `subscription`, `refresh`, `legacy` |
+| `engine` | `singbox_config`, `singbox_process`, `xray_config`, `xray_process`, `clash_api`, `routing`, `ports`, `slot`, `apps`, `tags` |
+| `forensics` | `traffic`, `connections`, `domains`, `enrichment`, `capture`, `etw`, `summary`, `export` |
+| `automation` | `scheduler`, `schedule`, `rotation`, `autopilot`, `adaptive`, `coordinator`, `tweaks`, `hardening` |
+| `probes` | `public_ip`, `ip_monitor`, `leak`, `diagnostics`, `local_proxy`, `availability`, `speedtest`, `ping`, `geo`, `egress`, `key_health`, `live`, `live_stages`, `curl`, `tls_client` |
+| `tunnel` | `api`, `fsm`, `lifecycle`, `runtime` (`actor`, `capture/{tun,proxy}`, `engines`, `watchdog`, `recovery`), `switch`, `outcome`, `history` |
+| `proxies` | `slot`, `manager`, `config`, `probe`, `health`, `control`, `token`, `model`; `src/bin/vpnte_proxy` |
+| `cleanup` | `legacy` |
+| `app` | `main`, `args`, `boot`, `root`, `setup`, `import`, `services`, `svc_core`, `svc_tunnel`, `svc_live`, `svc_proxies`, `api_*` (реализации `XxxApi`), `support` |
 
-Основной bridge находится в `src/preload/index.ts`. Каналы группируются по префиксу:
+## Вне `crates/`
 
-- core: `start-tun`, `stop-tun`, `get-tun-status`, `get-settings`, `save-settings`;
-- diagnostics/network: `run-*`, `network:*`, `firewall:*`, `system:*`, `get-traffic-*`;
-- profiles: `servers:*`, `groups:*`, `server:*`;
-- routing: `split-tunnel:*`, `domain-routing:*`, `dns:*`, `smart-route:*`;
-- automation/history: `scheduler:*`, `rotation:*`, `connection-history:*`, `traffic-history:*`;
-- UI/config: `notifications:*`, `config:*`, `theme:*`.
+| Путь | Что |
+| --- | --- |
+| `xtask/` | отдельный крейт `cargo xtask`: `engines`, `verify`, `nsis`, `dist`, `smoke-install`, `version` |
+| `installer/` | `vpnte.nsi` (установка на пользователя), `lang.nsh`, шимы `vpnte-proxy.cmd` / `.ps1`, лицензия GPL |
+| `resources/` | `engines.toml` (закрепы), наборы правил `.srs`; движки после `cargo xtask engines` |
+| `.cargo/config.toml` | статический CRT, алиас `xtask` |
 
-При добавлении канала меняются три места: реализация handler в main feature-модуле, метод `ElectronAPI`/`exposeInMainWorld` в preload и вызывающий код renderer. Для каждого канала должен существовать тест контракта или feature-тест.
+## Куда класть новое
 
-## Правило размещения новых файлов
-
-- Windows/VPN side effect → `src/main/<domain>.ts`.
-- IPC registration → рядом с доменным сервисом, функция `register...Handlers`.
-- Renderer-only state/view → `src/renderer/pages` или `src/renderer/components`.
-- Shared contract → `src/shared`.
-- Тест → рядом с исходным файлом, с тем же basename и суффиксом `.test.ts(x)`.
-- Документ, объясняющий решение или инвариант → `docs/architecture` или тематический RFC в `docs/`.
-
+- Новый модуль — в крейт своего слоя; зависимость вверх по слоям не добавлять, а взять трейт или данные.
+- Win32 — только в `winnet` (маленькие `unsafe` с `// SAFETY:`); UI — только в `ui`, бэкенд — через `XxxApi`.
+- Документы хранятся через `core::store::Store<T>`; каждый крейт владеет своими типами документов.
+- Строки для пользователя — `crates/<крейт>/locales/<пакет>.{ru,en}.json` под ключом верхнего уровня = имя
+  крейта.

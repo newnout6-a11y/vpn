@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "legacy": {
+      "notAnObject": "The saved server is damaged: its settings are not a JSON object.",
+      "unsupportedProtocol": "The saved server uses an unsupported protocol: {{protocol}}.",
+      "unusable": "The saved server cannot be used: its settings are incomplete or invalid.",
+      "invalidNativeGraph": "The saved Xray graph of this server is damaged."
+    },
+    "import": {
+      "realityFingerprint": "The key asks for a browser fingerprint (uTLS) that current REALITY servers refuse: only chrome, firefox and safari pass. If the key does not connect, ask the provider for a key with one of them",
+      "xrayTransportRemoved": "Xray 26 removed this key's HTTP/2 or QUIC transport, so the key runs on sing-box; settings only Xray has are not applied"
+    }
+  }
+}

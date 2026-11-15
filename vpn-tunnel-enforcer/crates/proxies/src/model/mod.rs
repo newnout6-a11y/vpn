@@ -1,0 +1,135 @@
+//! What the external-proxy feature talks in: route states, wire DTOs (field names and time
+//! encodings of the old control API, kept for its CLI and automation clients), requests, the
+//! error type and [`ProxyOps`], the operations the control API and the UI call.
+use serde::{Deserialize, Serialize};
+
+use crate::slot::Slot;
+
+mod error;
+mod ops;
+pub(crate) mod ready;
+mod wire;
+
+pub use error::ProxyError;
+pub use ops::ProxyOps;
+pub use ready::{FRESH_WINDOW_MS, derive_readiness};
+pub use wire::{
+    Aggregate, BatchFailure, BatchSkip, BatchSkipReason, BatchStartResult, ControlError,
+    GroupHealth, InstanceStatus, Instances, InstancesBatch, KeyHealth, PrewarmResult, ProfileList,
+    ProfileRow, ProxyStatus, ServerStatus, Unlimited, iso_ms,
+};
+
+/// Route health as the data-plane probe sees it (not a child-process flag). A consumer may use
+/// a route only when it is `Healthy` and additionally fresh, unique and ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Health {
+    #[default]
+    Stopped,
+    Starting,
+    Healthy,
+    Degraded,
+    Rotating,
+    Quarantined,
+    Failed,
+}
+
+/// Lifecycle of a slot. (The old type also listed `healthy`, but never set it.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lifecycle {
+    #[default]
+    Stopped,
+    Starting,
+    Ready,
+    Degraded,
+    Rotating,
+    Quarantined,
+    Failed,
+}
+
+/// Why a slot is not (or no longer) a usable route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Degradation {
+    ProcessFailed,
+    HealthFailureBudgetExhausted,
+    EgressIpChangedWithoutRotation,
+    RotationDidNotChangeEgressIp,
+    DuplicateEgressIp,
+    EgressProbeFailed,
+}
+
+/// What a start request asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Action {
+    /// Start the slot; a configured running slot is returned as it is.
+    #[default]
+    Start,
+    /// Move the slot to the next usable profile.
+    Rotate,
+    /// Start with the named profile; never picks one (old `connect` and `trigger`).
+    Connect,
+}
+
+impl Action {
+    /// Parses the action name of the old API (`trigger` means `connect`).
+    pub fn parse(name: &str) -> Option<Action> {
+        let name = name.trim();
+        [
+            ("start", Action::Start),
+            ("rotate", Action::Rotate),
+            ("connect", Action::Connect),
+            ("trigger", Action::Connect),
+        ]
+        .into_iter()
+        .find_map(|(n, action)| n.eq_ignore_ascii_case(name).then_some(action))
+    }
+}
+
+/// Start, rotate or connect one slot. `slot: None` means [`Slot::DEFAULT`]; `port: None` keeps
+/// the slot's current port, else its default port.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartRequest {
+    pub slot: Option<Slot>,
+    /// Country filter (ISO code, alias or free text); sticky for the slot until an explicit stop.
+    pub country: Option<String>,
+    pub profile_id: Option<String>,
+    pub port: Option<u16>,
+    pub action: Action,
+    /// Retried rotate requests with the same key do not rotate twice.
+    pub idempotency_key: Option<String>,
+    pub rotate_reason: Option<String>,
+}
+
+/// Who stopped a slot (for logs). The app exit is `ProxyManager::shutdown`, not a stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StopReason {
+    Api,
+    Ui,
+    VpnStop,
+}
+
+impl StopReason {
+    /// Log label (`api`, `ui`, `vpn-stop`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StopReason::Api => "api",
+            StopReason::Ui => "ui",
+            StopReason::VpnStop => "vpn-stop",
+        }
+    }
+}
+
+/// Validates the instance count of a prewarm request (`1..=MAX_SLOT`).
+pub fn prewarm_count(count: u64) -> Result<u16, ProxyError> {
+    u16::try_from(count)
+        .ok()
+        .filter(|n| (1..=crate::slot::MAX_SLOT).contains(n))
+        .ok_or_else(|| {
+            ProxyError::BadRequest(format!(
+                "count must be between 1 and {}",
+                crate::slot::MAX_SLOT
+            ))
+        })
+}

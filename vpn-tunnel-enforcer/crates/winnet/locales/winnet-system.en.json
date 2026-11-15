@@ -1,0 +1,11 @@
+{
+  "winnet": {
+    "autostart": {
+      "failed": "Could not change autostart — the setting is unchanged."
+    },
+    "clipboard": {
+      "busy": "The clipboard is in use by another program. Try again.",
+      "failed": "Could not copy to the clipboard."
+    }
+  }
+}

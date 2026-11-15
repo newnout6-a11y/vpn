@@ -1,0 +1,19 @@
+{
+  "app": {
+    "main": {
+      "internalError": "Internal error: the protection state is not confirmed",
+      "startFailed": {
+        "title": "VPN Tunnel Enforcer could not be opened",
+        "message": "Start-up stopped. Your saved settings were not replaced with empty data."
+      },
+      "webview2": {
+        "missing": "VPN Tunnel Enforcer needs Microsoft Edge WebView2 for its window, and this computer does not have it yet.",
+        "offer": "Install it now? It takes a minute or two and needs no administrator rights.",
+        "installing": "Installing Microsoft Edge WebView2…",
+        "pending": "Microsoft Edge WebView2 is still being installed. Start VPN Tunnel Enforcer again in a minute.",
+        "offline": "Microsoft Edge WebView2 could not be downloaded: there is no connection to Microsoft's server. Connect to the internet and start VPN Tunnel Enforcer again.",
+        "failed": "Microsoft Edge WebView2 was not installed (code {{code}}). Start VPN Tunnel Enforcer again to retry."
+      }
+    }
+  }
+}

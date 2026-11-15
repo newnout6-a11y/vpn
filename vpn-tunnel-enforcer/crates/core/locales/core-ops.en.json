@@ -1,0 +1,9 @@
+{
+  "core": {
+    "ops": {
+      "busy": "This operation is already running — wait until it finishes",
+      "closing": "The app is shutting down — no new operations are started",
+      "invalidTimeout": "Invalid operation time limit"
+    }
+  }
+}

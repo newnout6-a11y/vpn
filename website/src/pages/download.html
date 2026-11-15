@@ -1,56 +1,59 @@
-<!--{"path":"/download/","title":"Сборка и релизы — VPN Tunnel Enforcer для Windows","description":"Требования к системе и сборка VPN Tunnel Enforcer из исходного кода. Публичный установщик готовится.","nav":"download"}-->
+<!--{"path":"/download/","title":"Сборка и релизы — VPN Tunnel Enforcer для Windows","description":"Требования к системе и сборка VPN Tunnel Enforcer 2.0.0 из исходного кода: установщик на пользователя без UAC и переносной архив. Публичный релиз готовится.","nav":"download"}-->
 <section class="page-hero">
   <div class="bg-grid" aria-hidden="true"></div>
   <div class="wrap">
     <nav class="crumbs" aria-label="Хлебные крошки"><a href="{{base}}./">Главная</a><span>/</span><span>Сборка и релизы</span></nav>
     <h1 class="h1 split-words">Соберите <span class="grad">под Windows</span></h1>
-    <p class="lead" data-reveal style="--d:.2s">Клиент для Windows 10 (сборка 19041+) и Windows 11, x64. Версия 1.1.22. Публичного установщика пока нет — клиент собирается из исходников.</p>
+    <p class="lead" data-reveal style="--d:.2s">Клиент для Windows 10 и 11, x64, версия 2.0.0. Публичного релиза пока нет: клиент собирается из исходников, и сборка даёт установщик и переносной архив.</p>
   </div>
 </section>
 
 <section class="section section--tight">
   <div class="wrap split split--top">
-    <div data-reveal="left" style="display:grid;gap:22px">
+    <div data-reveal="left" style="display:grid;gap:24px">
       <div class="os">
         <img src="{{base}}assets/logo.svg" alt="" width="68" height="68">
         <div>
-          <h3>VPN Tunnel Enforcer 1.1.22</h3>
-          <p class="muted" style="margin-bottom:16px">Установщик NSIS и портативная версия</p>
+          <h3>VPN Tunnel Enforcer 2.0.0</h3>
+          <p class="muted" style="margin-bottom:16px">Установщик на пользователя и переносной архив</p>
           <span class="tag tag--a">публичный релиз готовится</span>
         </div>
       </div>
-      <div class="callout">{{icon:triangle-alert|icon}}<div><b>Публичного установщика пока нет.</b> Перед релизом нужно закрыть проверку установки и обновления на разных версиях Windows и опубликовать контрольные суммы. Решение о подписи кода тоже ещё не принято, поэтому первые сборки, вероятно, будут без подписи, и SmartScreen покажет предупреждение. Это наш вывод, а не гарантия.</div></div>
+      <div class="callout">{{icon:triangle-alert|icon}}<div><b>Публичного релиза пока нет.</b> Часть проверок установщика в CI ещё не пройдена, обновление поверх версии 1.1.24 не проверялось. Сборки не подписаны (решение владельца проекта), поэтому SmartScreen, скорее всего, покажет предупреждение; к релизу прикладывается <code class="mono">checksums.txt</code>.</div></div>
       <a class="btn btn--primary btn--lg" href="https://github.com/newnout6-a11y/vpn/releases" rel="noopener" style="justify-self:start">{{icon:github|icon}} Страница релизов</a>
     </div>
     <dl class="sysreq" data-reveal="right">
-      <div><dt>ОС</dt><dd>Windows 10 (19041+) или Windows 11, x64</dd></div>
-      <div><dt>Права</dt><dd>Hard Mode — администратор (UAC встроен в приложение). Soft Mode работает без прав.</dd></div>
-      <div><dt>Сеть</dt><dd>Ваша подписка или ключ любого из 10 поддерживаемых протоколов</dd></div>
-      <div><dt>Диск</dt><dd>Нужно место для сессий форензики: по умолчанию до 3 сессий по 512 МБ</dd></div>
-      <div><dt>Лицензия</dt><dd>MIT</dd></div>
+      <div><dt>ОС</dt><dd>Windows 10 или 11, x64, с WebView2 Runtime (в Windows 11 он есть)</dd></div>
+      <div><dt>Права</dt><dd>Не нужны. «Туннель», kill switch на WFP и захват пакетов — только при запуске от имени администратора</dd></div>
+      <div><dt>Установка</dt><dd>В <code class="mono">%LOCALAPPDATA%\Programs\VPN Tunnel Enforcer</code>, только HKCU и ярлыки пользователя, без UAC. Или переносной zip: распаковать и запустить</dd></div>
+      <div><dt>Внутри</dt><dd><code class="mono">VPN Tunnel Enforcer.exe</code>, <code class="mono">vpnte-proxy.exe</code>, движки и наборы правил в <code class="mono">resources\</code>, лицензии в <code class="mono">licenses\</code>. VC++ Redistributable не нужен</dd></div>
+      <div><dt>Сеть</dt><dd>Ваша подписка или ключ одного из 11 видов</dd></div>
+      <div><dt>Лицензия</dt><dd>MIT; движки — под своими лицензиями</dd></div>
     </dl>
   </div>
 </section>
 
 <section class="section">
   <div class="wrap">
-    <div class="section__head" data-reveal><span class="eyebrow">Для разработчиков</span><h2 class="h2">Соберите <span class="grad">из исходников</span></h2><p class="lead">Если вы хотите попробовать уже сейчас, клиент собирается локально. Нужен Node.js 24.21+.</p></div>
+    <div class="section__head" data-reveal><span class="eyebrow">Для разработчиков</span><h2 class="h2">Соберите <span class="grad">из исходников</span></h2><p class="lead">Нужны Rust 1.99 (MSVC, через rustup) и WebView2 Runtime. NSIS <code class="mono">cargo xtask</code> скачивает сам, Node.js клиенту не нужен.</p></div>
     <div class="split split--top">
       <div class="term" data-reveal="left">
         <div class="term__bar"><i></i><i></i><i></i><span>PowerShell</span><button data-copy="#build-code">{{icon:copy|icon}} Копировать</button></div>
-<pre id="build-code"><span class="c"># клонирование и запуск в режиме разработки</span>
+<pre id="build-code"><span class="c"># клонирование</span>
 git clone https://github.com/newnout6-a11y/vpn.git
 cd vpn/vpn-tunnel-enforcer
-npm install
-npm run dev
 
-<span class="c"># установщик Windows (NSIS)</span>
-npm run dist:win</pre>
+<span class="c"># закреплённые движки: скачать и сверить SHA-256</span>
+cargo xtask engines
+cargo xtask verify
+
+<span class="c"># установщик, переносной архив и checksums.txt в target/dist/</span>
+cargo xtask dist</pre>
       </div>
       <ul class="checks" data-reveal="right">
-        <li>{{icon:check|icon}}<span><b>Откройте окно Electron,</b> а не адрес Vite в браузере: интерфейс использует типизированный мост contextBridge.</span></li>
-        <li>{{icon:triangle-alert|icon}}<span><b>Бинарники нужно добавить вручную.</b> В репозитории нет <code class="mono">sing-box.exe</code>, <code class="mono">xray.exe</code>, <code class="mono">wintun.dll</code> и <code class="mono">libcronet.dll</code>. Положите их в <code class="mono">resources/</code> до сборки.</span></li>
-        <li>{{icon:triangle-alert|icon}}<span><b>Rust-сайдкар опционален.</b> Без cargo в установщик попадёт только PowerShell-фолбэк, он опрашивает журнал событий и на части систем теряет события.</span></li>
+        <li>{{icon:check|icon}}<span><b>Движки скачиваются сами.</b> <code class="mono">cargo xtask engines</code> берёт sing-box 1.14.4, Xray 26.11.9 и Wintun 0.14.1 по адресам и SHA-256 из <code class="mono">resources/engines.toml</code>.</span></li>
+        <li>{{icon:check|icon}}<span><b>Запуск из исходников.</b> <code class="mono">cargo run -p vpnte-app</code> с абсолютным путём к <code class="mono">resources/</code> в <code class="mono">VPNTE_RESOURCES_DIR</code>. Чтобы не трогать свои данные, укажите отдельную папку в <code class="mono">VPNTE_DATA_DIR</code>.</span></li>
+        <li>{{icon:triangle-alert|icon}}<span><b>Не все тесты идут локально.</b> <code class="mono">cargo test --workspace</code> пропускает группы <code class="mono">elevated_*</code> и <code class="mono">system_*</code>: им нужны права администратора или реальные настройки пользователя, их запускает CI.</span></li>
       </ul>
     </div>
   </div>
@@ -60,9 +63,9 @@ npm run dist:win</pre>
   <div class="wrap">
     <div class="section__head" data-reveal><span class="eyebrow">Первый запуск</span><h2 class="h2">Три шага <span class="grad">до защиты</span></h2></div>
     <div class="grid grid--3" data-stagger>
-      <article class="card" data-reveal><div class="card__icon">{{icon:key-round|icon}}</div><h3>1. Добавьте ключ</h3><p>Вставьте подписку или ключ любого поддерживаемого протокола. Клиент проверит его в изолированном ядре.</p></article>
-      <article class="card" data-reveal><div class="card__icon">{{icon:gauge|icon}}</div><h3>2. Planner подскажет режим</h3><p>Connection Planner проверит систему и порекомендует Hard или Soft Mode.</p></article>
-      <article class="card" data-reveal><div class="card__icon card__icon--g">{{icon:shield-check|icon}}</div><h3>3. Запустите self-test</h3><p>Проверка на утечки покажет, остаётся ли физический адаптер заблокированным.</p></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:key-round|icon}}</div><h3>1. Добавьте ключ</h3><p>Вставьте подписку или ключ. Проверка ключа запустит временный движок, прокачает 64 КиБ через сервер и покажет вердикт с причиной.</p></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:gauge|icon}}</div><h3>2. Выберите режим</h3><p>Без прав первый запуск выбирает «Прокси». Для «Туннеля» запустите приложение от имени администратора: само оно права не попросит.</p></article>
+      <article class="card" data-reveal><div class="card__icon card__icon--g">{{icon:shield-check|icon}}</div><h3>3. Проверьте утечки</h3><p>Проверка IP и утечек покажет, что идёт через VPN. В «Прокси» она же скажет, если WebRTC может выдать реальный адрес.</p></article>
     </div>
   </div>
 </section>

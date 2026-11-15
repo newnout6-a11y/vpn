@@ -1,0 +1,26 @@
+{
+  "ui": {
+    "helper": {
+      "tunnel": "Tunnel mode works through the helper service.",
+      "killSwitch": "“Always” and the exceptions work through the helper service.",
+      "viaService": "Works through the helper service.",
+      "notInVersion": "Not available in this version.",
+      "install": "Install the helper service",
+      "starting": "The helper service is starting…",
+      "stopped": "The helper service is stopped. Proxy mode works without it.",
+      "outdated": "The helper service is out of date. Proxy mode works without it.",
+      "update": "Update the helper service",
+      "strip": {
+        "title": "Tunnel mode",
+        "body": "Works through the helper service. Proxy mode works without it."
+      }
+    },
+    "maintenance": {
+      "protection": {
+        "state": {
+          "proxyOnly": "Without the helper service there are no filters: protection works through the system proxy."
+        }
+      }
+    }
+  }
+}

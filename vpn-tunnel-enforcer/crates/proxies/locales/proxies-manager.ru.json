@@ -1,0 +1,15 @@
+{
+  "proxies": {
+    "degradation": {
+      "processFailed": "Прокси не запустился или его процесс завершился",
+      "healthFailureBudgetExhausted": "Отключён после повторных сбоев проверки",
+      "egressIpChangedWithoutRotation": "Внешний IP сменился без смены профиля",
+      "rotationDidNotChangeEgressIp": "После смены профиля внешний IP остался прежним",
+      "duplicateEgressIp": "Через этот внешний IP уже выходит другой прокси",
+      "egressProbeFailed": "Проверка маршрута не прошла"
+    },
+    "slot": {
+      "spoofDropped": "«{{name}}»: подмена TLS-приветствия от провайдера (tls.spoof) работает только в туннеле через службу-помощник, этот прокси работает без неё."
+    }
+  }
+}

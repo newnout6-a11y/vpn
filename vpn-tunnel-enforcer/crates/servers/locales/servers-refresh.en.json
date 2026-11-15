@@ -1,0 +1,30 @@
+{
+  "servers": {
+    "fetch": {
+      "ok": "Updated",
+      "partial": "Updated, but some entries could not be read",
+      "emptyList": "The subscription returned an empty list of profiles",
+      "body": {
+        "html": "A web page came instead of the key list: the subscription may have expired or access may be blocked",
+        "json": "The response is JSON without supported keys",
+        "base64": "The response is base64 data without supported keys",
+        "uris": "The response holds no supported key",
+        "other": "The subscription server's response could not be read"
+      },
+      "http": "The subscription server answered with HTTP error {{code}}",
+      "net": {
+        "dns": "The subscription server's address could not be found (DNS)",
+        "connect": "Could not connect to the subscription server",
+        "tls": "A secure connection to the subscription server could not be established",
+        "proxy": "The local proxy does not answer",
+        "reset": "The connection to the subscription server was interrupted"
+      },
+      "timeout": "The subscription server did not answer in time",
+      "invalidUrl": "This is not a subscription address: an http:// or https:// link is needed"
+    },
+    "refresh": {
+      "groupChanged": "The subscription was changed or deleted during the refresh",
+      "unusableUrl": "The subscription has no usable address: add it again"
+    }
+  }
+}

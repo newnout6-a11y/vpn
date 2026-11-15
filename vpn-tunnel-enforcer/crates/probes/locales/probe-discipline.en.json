@@ -1,0 +1,26 @@
+{
+  "probes": {
+    "discipline": {
+      "deferred": "The check is postponed: this server already had 3 new connections in the last minute, the next one is possible in {{seconds}} s (more would make the network freeze the server for about 2 minutes)",
+      "liveDeferred": "Requests through the server left out: {{count}}. Its connection limit for this minute is used up (more would make the network freeze it)"
+    },
+    "verdict": {
+      "healthy": "The server works: more than 64 KB passed through it",
+      "frozen": "Frozen: after the first ~16 KB the data stops without the connection being reset. The network throttles traffic to this server's hosting",
+      "stalled": "The data stopped in the middle of the download: the connection is up, but traffic does not pass",
+      "handshakeFailed": "TCP connects, but the TLS / REALITY handshake fails: the fingerprint, the REALITY settings or the server version probably do not match",
+      "keyRejected": "The server rejected the key: it is outdated or wrong. Refresh the subscription",
+      "ipBanned": "The server's IP address is blocked on this network: ping passes, TCP and UDP do not. Changing the port or the transport will not help",
+      "udpBlocked": "UDP (QUIC, Hysteria, TUIC) is blocked on this network, TCP to the server passes",
+      "offline": "The server does not respond",
+      "deferred": "Not checked: the connection limit for this server is used up for this minute, the check comes later",
+      "notVerified": "Not verified: the results do not point to a cause"
+    },
+    "reaction": {
+      "switchServer": "Choose another server",
+      "tryAnotherFingerprint": "Try another TLS fingerprint (chrome or firefox) or the other engine",
+      "preferTcpTransport": "Choose a server with a TCP transport (VLESS, Trojan)",
+      "retryLater": "Try again in a couple of minutes"
+    }
+  }
+}

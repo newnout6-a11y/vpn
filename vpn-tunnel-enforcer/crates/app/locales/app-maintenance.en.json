@@ -1,0 +1,49 @@
+{
+  "app": {
+    "maintenance": {
+      "tunnelBusy": "Please wait: connecting or disconnecting has not finished yet.",
+      "snapshotsFailed": "Could not create the snapshots folder.",
+      "capture": {
+        "unavailable": "Packet capture is not available in this version of the app."
+      },
+      "protection": {
+        "failed": "The protection could not be applied.",
+        "unreadable": "The protection filters could not be read."
+      },
+      "repair": {
+        "running": "The repair is already running.",
+        "disconnectFirst": "Disconnect the VPN first: the repair runs only without an active connection.",
+        "strictKept": "Strict mode: the persistent filters were kept. To remove them, turn strict mode off in Settings.",
+        "filtersRemoved": "VPNTE filters removed: {{count}}",
+        "legacyDeferred": "The old version is still running: close it and repeat the repair.",
+        "legacyInstalled": "The old version is still installed: its protection is left alone. Uninstall it and repeat the repair.",
+        "checkRunning": "A server check is running: no processes were stopped, repeat after it finishes.",
+        "viaService": "Works through the helper service.",
+        "notInVersion": "Not available in this version."
+      },
+      "selfTest": {
+        "needsSession": "The protection test works only with an active connection."
+      },
+      "route": {
+        "softMode": "The routing test works only in Tunnel mode."
+      },
+      "legacy": {
+        "retryUnavailable": "Re-importing the keys is not available in this version of the app: they stay in the old version's files.",
+        "importPending": "The old version's data has not been fully imported yet: restart the app and try again.",
+        "keysPending": "Move the keys from the old version first: otherwise they are lost with the folder.",
+        "notOldData": "This folder does not look like the old version's data and will not be deleted.",
+        "inUse": "The old version's files are in use: close the old version of the app and try again.",
+        "denied": "Access to some of the old version's files was denied.",
+        "deleteFailed": "Some of the old version's files could not be deleted.",
+        "unknownStore": "Unknown data file.",
+        "store": {
+          "profiles": "Profiles"
+        }
+      },
+      "network": {
+        "busy": "The network check is already running",
+        "changed": "The network changed during the check: its result was discarded. The new network is checked on its own in a few seconds"
+      }
+    }
+  }
+}

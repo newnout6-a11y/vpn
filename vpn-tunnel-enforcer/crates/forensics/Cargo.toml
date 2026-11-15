@@ -1,0 +1,39 @@
+[package]
+name = "vpnte-forensics"
+description = "Traffic statistics, domain history, packet capture, ETW events and the diagnostics export."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# In-process ETW consumer (ex-sidecar). ferrisetw pins `windows` 0.57; `windows-etw` below reuses that
+# same build for the one call ferrisetw does not expose (ControlTraceW QUERY: events / buffers lost).
+ferrisetw = "1.2.0"
+futures-util.workspace = true
+hex.workspace = true
+jiff.workspace = true
+parking_lot.workspace = true
+# Public suffix list: registrable domain of site names, ICANN suffixes of export host pseudonyms.
+psl = "2.1.250"
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+vpnte-base.workspace = true
+vpnte-core.workspace = true
+vpnte-winnet.workspace = true
+windows.workspace = true
+windows-etw = { package = "windows", version = "0.57", features = ["Win32_Foundation", "Win32_System_Diagnostics_Etw"] }
+# The diagnostics ZIP: Deflate through flate2's pure-Rust zlib-rs backend (no C build).
+zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[lints]
+workspace = true

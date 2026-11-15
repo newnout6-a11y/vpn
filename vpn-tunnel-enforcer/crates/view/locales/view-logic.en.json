@@ -1,0 +1,32 @@
+{
+  "view": {
+    "dash": "—",
+    "leak": {
+      "outsideProxy": "Outside proxy",
+      "outsideProxyHint": "Programs that ignore the system proxy, and UDP, go direct: that is how Proxy mode works."
+    },
+    "status": {
+      "proxyDown": "Server not responding — traffic blocked",
+      "degraded": "Connected — protection weakened",
+      "degradedTun": "Connected — protection weakened: second VPN/TUN {{name}}"
+    },
+    "identity": {
+      "country": "{{country}}",
+      "countryCity": "{{country}}, {{city}}",
+      "ping": "{{ms}} ms",
+      "metaPing": "{{protocol}} · {{ms}} ms",
+      "metaOffline": "{{protocol}} · offline",
+      "metaUnchecked": "{{protocol}} · not checked",
+      "unmeasured": "not measured yet"
+    },
+    "traffic": {
+      "hover": "{{mbps}} Mbit/s · {{n}} s ago"
+    },
+    "fact": {
+      "modeProxy": "Proxy",
+      "modeTunnel": "Tunnel",
+      "ksProxy": "Via proxy",
+      "ksNeedsAdmin": "Needs the helper service"
+    }
+  }
+}

@@ -1,0 +1,103 @@
+/* availability.css — the Availability page (vpnte_ui::availability) in the «Пломба» language:
+ * swiss.css tokens only (--paper --ink --mute --rule --rule-strong --signal --on-signal
+ * --signal-ink), square corners, hairlines, mono captions. Panels, badges, buttons and the input
+ * are the shared widgets. Two columns from 820 px of page width, one below (the history stays on
+ * the page at every width, U-12). */
+
+.av { display: flex; min-height: 100%; flex-direction: column; gap: 20px; padding-bottom: 24px; color: var(--ink); container: av / inline-size; }
+.av > .w-section-head { margin-bottom: 0; }
+.av-grid { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 20px; }
+@container av (min-width: 820px) { .av-grid { grid-template-columns: minmax(0, 1fr) 300px; } }
+.av-main, .av-side { display: flex; min-width: 0; flex-direction: column; gap: 20px; }
+
+.av-hint { margin-top: 12px; font-size: 12px; line-height: 1.45; color: var(--mute); }
+.av-hint:first-child { margin-top: 0; }
+.av-hint.is-strong { color: var(--ink); font-weight: 500; }
+.av-error { display: flex; align-items: baseline; gap: 8px; margin-top: 12px; font-size: 13px; font-weight: 500; line-height: 1.45; color: var(--signal-ink); overflow-wrap: anywhere; }
+.av-error::before { content: ''; width: 8px; height: 8px; flex-shrink: 0; background: var(--signal); }
+
+/* ── Link check ──────────────────────────────────────────────────────── */
+.av-form { display: flex; align-items: center; gap: 8px; }
+.av-input { min-width: 0; flex: 1 1 auto; }
+.av-input .w-input { width: 100%; }
+
+/* ── Result ──────────────────────────────────────────────────────────── */
+.av-result-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; }
+.av-result-url { min-width: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.av-age { flex-shrink: 0; font-size: 11px; color: var(--mute); white-space: nowrap; }
+.av-verdict { display: flex; align-items: flex-start; gap: 8px 16px; flex-wrap: wrap; margin-top: 12px; }
+.av-verdict .w-badge { flex-shrink: 0; }
+.av-reco { min-width: 0; flex: 1 1 260px; font-size: 13px; line-height: 1.5; }
+
+/* The two paths share the panel's frame: hairlines come from the 1 px gaps over --rule. */
+.av-paths {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 1px;
+  margin: 16px -20px -16px;
+  border-top: 1px solid var(--rule);
+  background: var(--rule);
+}
+.av-path { display: flex; min-width: 0; flex-direction: column; gap: 12px; background: var(--paper); padding: 16px 20px; }
+.av-path-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.c-swiss .av-path-title { color: var(--ink); }
+.c-swiss .av-path-source { flex-shrink: 0; font-size: 10px; }
+.av-path-missing { font-size: 13px; line-height: 1.45; color: var(--mute); }
+.av-path-status { display: flex; align-items: center; gap: 8px; }
+.av-ms { margin-left: auto; font-size: 12px; color: var(--mute); font-variant-numeric: tabular-nums; }
+.av-note { border-left: 2px solid var(--rule-strong); padding-left: 12px; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.av-note.is-warn { border-left-color: var(--signal); }
+
+.av-stages { display: flex; flex-direction: column; margin: 0; }
+.av-stage {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+  border-top: 1px solid var(--rule);
+  padding: 8px 0;
+  font-size: 12px;
+}
+.av-stage dd { margin: 0; }
+.av-stage-label { font-size: 11px; color: var(--mute); }
+.av-stage-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.av-stage-value.is-warn { color: var(--signal-ink); }
+.av-stage-value.is-fail { color: var(--signal-ink); font-weight: 600; }
+.av-stage-ms { font-size: 11px; color: var(--mute); font-variant-numeric: tabular-nums; }
+
+/* ── Routing self-test ───────────────────────────────────────────────── */
+.av-routing { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; margin-top: 12px; border-top: 1px solid var(--rule); padding-top: 12px; }
+.av-routing-msg { font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.av-ips { display: flex; width: 100%; flex-direction: column; margin: 0; }
+.av-ip { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid var(--rule); padding: 8px 0; font-size: 12px; }
+.av-ip dt { color: var(--mute); }
+.av-ip dd { margin: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+
+/* ── History ─────────────────────────────────────────────────────────── */
+.av-history { margin: 0; padding: 0; list-style: none; }
+.av-history-row {
+  display: flex;
+  width: 100%;
+  align-items: flex-start;
+  gap: 8px;
+  border-top: 1px solid var(--rule);
+  background: transparent;
+  padding: 12px 20px;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+.av-history > li:first-child > .av-history-row { border-top: 0; }
+.av-history-row:hover { background: var(--rule); }
+.av-history-row.is-current { box-shadow: inset 2px 0 0 var(--signal); }
+.av-history-row:focus-visible { outline: 2px solid var(--signal); outline-offset: -2px; border-radius: 0; }
+.av-history-text { display: flex; min-width: 0; flex: 1 1 auto; flex-direction: column; gap: 2px; }
+.av-history-text .w-trunc { font-size: 13px; font-weight: 500; }
+.av-history-meta { font-size: 11px; color: var(--mute); }
+.av-history-note { margin: 0; padding: 12px 20px; }
+.av-dot { width: 8px; height: 8px; flex-shrink: 0; margin-top: 5px; border: 1px solid var(--ink); }
+.av-dot[data-tone='ok'] { background: var(--ink); }
+.av-dot[data-tone='warn'] { border-color: var(--signal); }
+.av-dot[data-tone='fail'] { border-color: var(--signal); background: var(--signal); }
+.av-dot[data-tone='unknown'] { border-style: dashed; border-color: var(--mute); }

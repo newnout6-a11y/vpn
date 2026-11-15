@@ -1,0 +1,94 @@
+/* schedule.css — the Schedule page (vpnte_ui::schedule) in the «Пломба» language: swiss.css tokens
+ * only (--paper --ink --mute --rule --rule-strong --signal --on-signal --signal-ink), square
+ * corners, hairlines, mono for times. Panels, buttons, switches and badges are the shared widgets. */
+
+/* The page fill (paper over the page container, its padding) comes from swiss.css .swiss-skin. */
+.sched { display: flex; flex-direction: column; gap: 20px; color: var(--ink); }
+.sched > .w-section-head { margin-bottom: 0; }
+
+/* ── Next event ──────────────────────────────────────────────────────── */
+.sched-next {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--ink);
+  padding: 12px 20px 12px 18px;
+  background: var(--paper);
+}
+.sched-next-mark { flex-shrink: 0; }
+.sched-next-mark.is-start {
+  width: 0;
+  height: 0;
+  border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent;
+  border-left: 10px solid var(--ink);
+}
+.sched-next-mark.is-stop { width: 10px; height: 10px; background: var(--signal); }
+.sched-next-text { min-width: 0; }
+.sched-next-title { margin: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.sched-next-detail { margin: 4px 0 0; font-size: 12px; color: var(--mute); }
+
+/* ── List ────────────────────────────────────────────────────────────── */
+.sched-list { margin: 0; padding: 0; list-style: none; }
+.sched-item { display: flex; align-items: center; gap: 16px; border-top: 1px solid var(--rule); padding: 12px 20px; }
+.sched-item:first-child { border-top: 0; }
+.sched-item.is-editing { box-shadow: inset 2px 0 0 var(--signal); }
+.sched-item-text { min-width: 0; flex: 1 1 auto; }
+.sched-item-name { margin: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.sched-item-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin: 4px 0 0; font-size: 12px; color: var(--mute); }
+.sched-item-meta .swiss-mono { color: var(--ink); font-variant-numeric: tabular-nums; }
+.sched-item-hint { color: var(--ink); }
+.sched-item-server { color: var(--ink); overflow-wrap: anywhere; }
+.sched-item-server.is-missing { color: var(--signal-ink); }
+/* A TUN schedule in an unelevated app: it cannot connect (NOADMIN §0). */
+.sched-unavailable { margin: 4px 0 0; font-size: 12px; color: var(--signal-ink); }
+.sched-item-hint::before { content: '— '; color: var(--mute); }
+.sched-item.is-off .sched-item-name,
+.sched-item.is-off .sched-item-meta .swiss-mono,
+.sched-item.is-off .sched-item-hint,
+.sched-item.is-off .sched-item-server { color: var(--mute); }
+.sched-item-actions { display: flex; flex-shrink: 0; align-items: center; gap: 4px; }
+
+/* ── Form ────────────────────────────────────────────────────────────── */
+.sched-form { display: flex; max-width: 640px; flex-direction: column; gap: 16px; }
+.sched-field { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
+.sched-field > .w-seg { align-self: flex-start; max-width: 100%; }
+.sched-days { display: flex; flex-wrap: wrap; gap: 8px; }
+.sched-day {
+  min-width: 44px;
+  height: 32px;
+  border: 1px solid var(--rule-strong);
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  background: transparent;
+  cursor: pointer;
+  transition: color 0.15s, background-color 0.15s, border-color 0.15s;
+}
+.sched-day:hover { border-color: var(--ink); }
+.sched-day[aria-pressed='true'] { border-color: var(--ink); background: var(--ink); color: var(--paper); }
+.sched-day:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; border-radius: 0; }
+.sched-times { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 16px; }
+.sched-times .w-field { width: 156px; }
+.sched-time { width: 100%; font-variant-numeric: tabular-nums; }
+[data-theme='dark'] .sched-time { color-scheme: dark; }
+.sched-hint {
+  display: inline-flex;
+  height: 36px;
+  align-items: center;
+  margin: 0;
+  border-left: 2px solid var(--signal);
+  padding-left: 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.sched-form-error { margin: 0; font-size: 13px; font-weight: 500; color: var(--signal-ink); overflow-wrap: anywhere; }
+.sched-form-actions { display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--rule); padding-top: 16px; }
+
+@media (max-width: 960px) {
+  .sched-item { flex-wrap: wrap; }
+  .sched-item-text { flex-basis: calc(100% - 140px); }
+}

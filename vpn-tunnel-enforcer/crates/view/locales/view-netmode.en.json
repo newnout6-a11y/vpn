@@ -1,0 +1,26 @@
+{
+  "view": {
+    "netmode": {
+      "whitelist": {
+        "title": "This network lets through only whitelisted Russian sites",
+        "body": "Foreign servers are unreachable here. You need a server whose entry is in a Russian range"
+      },
+      "freeze": {
+        "title": "This network freezes transfers after 16 KB",
+        "body": "Plain TCP servers at foreign hosting providers will hang: XHTTP works better"
+      },
+      "serverBlocked": {
+        "title": "Your server's IP address is blocked on this network",
+        "body": "Changing the port will not help: choose a server with another address"
+      },
+      "udpBlocked": {
+        "title": "QUIC and UDP are blocked on this network",
+        "body": "Hysteria2, TUIC and WireGuard will not work: the app prefers TCP servers"
+      },
+      "dohBlocked": {
+        "title": "Encrypted DNS is blocked on this network",
+        "body": "The app has switched to other resolvers on its own"
+      }
+    }
+  }
+}

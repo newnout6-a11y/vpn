@@ -1,0 +1,186 @@
+{
+  "probes": {
+    "live": {
+      "profileNotFound": "Profile not found",
+      "shuttingDown": "The app is shutting down: the check was not started",
+      "batch": {
+        "size": "A batch check takes 1 to {{max}} profiles",
+        "notEligible": "Profile not found, disabled or removed from its subscription"
+      },
+      "history": {
+        "invalidRow": "The check result is damaged and was not saved"
+      },
+      "engine": {
+        "noProbePort": "Separate handshake check skipped: the active tunnel has no local SOCKS port available.",
+        "handshakeFailed": "The handshake failed ({{reason}})",
+        "noProfile": "No profile selected: nothing was checked through a tunnel"
+      },
+      "egress": {
+        "discrepancy": "IP mismatch: {{first}} vs {{second}}"
+      },
+      "media": {
+        "unreachable": "Twitch HLS / CDN servers are unreachable through this tunnel.",
+        "risk": "Twitch error #2000 risk: a TCP-only profile does not block QUIC (UDP/443).",
+        "guarded": "HLS media streams are protected. The QUIC blackhole guard is active (UDP/443 is blocked, browsers fall back to HTTPS/TCP).",
+        "udp": "HLS media streams are reachable. The profile supports UDP/QUIC."
+      },
+      "throughput": {
+        "stable": "The stream was steady during the short diagnostic probe.",
+        "unstable": "The stream is uneven: compare min/max, stalls and the longest pause with other profiles.",
+        "partial": "Not all short samples arrived: {{error}}. Compare the available min/max and stalls with other profiles."
+      },
+      "split": {
+        "disabled": "Split tunneling is off: all traffic follows the normal default route.",
+        "duplicates": "The same process_name appears in several rules: {{names}}.",
+        "direct": "The direct route is assigned to {{names}} process names and {{paths}} application paths; other applications go through proxy-out.",
+        "none": "No explicit direct rules: applications go through proxy-out."
+      },
+      "finding": {
+        "privateTarget": {
+          "title": "Server on a private network",
+          "detail": "Address {{ip}} belongs to a private network; the results only describe the local path."
+        },
+        "dnsMultiIp": {
+          "title": "Several IP addresses in DNS",
+          "detail": "The host resolves to {{count}} addresses: {{ips}}"
+        },
+        "dnsChanged": {
+          "title": "DNS addresses changed",
+          "detail": "The IP changed from {{previous}} to {{current}}"
+        },
+        "tlsExpired": {
+          "title": "TLS certificate expires or has expired",
+          "detail": "The certificate is valid for {{days}} more days (until {{validTo}})"
+        },
+        "tlsExpiring": {
+          "title": "TLS certificate expires soon",
+          "detail": "The certificate expires in {{days}} days."
+        },
+        "tlsSanMismatch": {
+          "title": "Host name missing from the certificate SAN",
+          "detail": "The certificate was issued for [{{names}}], checked against {{host}}"
+        },
+        "tlsFingerprintChanged": {
+          "title": "TLS certificate fingerprint changed",
+          "detail": "The certificate fingerprint changed since the previous check"
+        },
+        "tlsUntrusted": {
+          "title": "Untrusted TLS certificate",
+          "detail": "The system did not confirm the certificate chain ({{error}}); for VPN servers with a self-signed certificate this is normal."
+        },
+        "httpRedirect": {
+          "title": "HTTP redirect",
+          "detail": "HTTP response {{code}} redirects to {{location}}"
+        },
+        "httpServerError": {
+          "title": "The server returned an HTTP 5xx error",
+          "detail": "HTTP status: {{code}}"
+        },
+        "portOpen": {
+          "title": "Open ports found",
+          "detail": "Open ports: {{ports}}"
+        },
+        "tcpUnreachable": {
+          "title": "Server unreachable over TCP",
+          "detail": "Could not connect to {{host}}:{{port}}: {{error}}"
+        },
+        "packetLossHigh": {
+          "title": "High share of failed TCP connections",
+          "detail": "The connection failed in {{pct}}% of attempts"
+        },
+        "packetLoss": {
+          "title": "Failed TCP connections during the latency check",
+          "detail": "The connection failed in {{pct}}% of attempts"
+        },
+        "latencyCritical": {
+          "title": "Critically high latency",
+          "detail": "The average RTT is {{avg}} ms"
+        },
+        "latencyHigh": {
+          "title": "Elevated latency to the server",
+          "detail": "Average RTT: {{avg}} ms"
+        },
+        "jitterHigh": {
+          "title": "Unstable connection (high jitter)",
+          "detail": "RTT variation (jitter): {{jitter}} ms"
+        },
+        "asnChanged": {
+          "title": "The autonomous system (ASN) changed",
+          "detail": "The ASN changed from {{previous}} to {{current}} ({{org}})"
+        },
+        "cidrShared": {
+          "title": "Subnet shared with other servers",
+          "detail": "The server is in the same /24 subnet as: {{names}}"
+        },
+        "egressCountryMismatch": {
+          "title": "Exit country differs from the server country",
+          "detail": "Traffic exits in {{egress}}, the server is in {{endpoint}}"
+        },
+        "dnsResolverDiscrepancy": {
+          "title": "DNS resolvers disagree"
+        },
+        "handshakeFailed": {
+          "title": "Tunnel handshake failed",
+          "detail": "The {{protocol}} protocol failed the check: {{error}}"
+        },
+        "egressFailed": {
+          "title": "Internet exit (egress) check failed",
+          "detail": "The reflectors did not confirm an exit through the tunnel",
+          "detailError": "The reflectors did not confirm an exit through the tunnel: {{error}}"
+        },
+        "egressPartial": {
+          "title": "Internet exit partly confirmed",
+          "detail": "One of the exit reflectors did not answer or the answers disagree",
+          "detailError": "One of the exit reflectors did not answer: {{error}}"
+        },
+        "egressDiffers": {
+          "title": "The exit IP differs from the connection IP",
+          "detail": "Endpoint: {{endpoint}}, actual egress: {{exit}} ({{country}})"
+        },
+        "pmtuBlackhole": {
+          "title": "Suspected PMTU blackhole",
+          "detail": "Large packets are dropped without an ICMP reply"
+        },
+        "lowPmtu": {
+          "title": "Low path MTU",
+          "detail": "An MTU of {{pmtu}} bytes was found. This can cause more packet fragmentation."
+        },
+        "throughputFailed": {
+          "title": "Could not measure throughput through the profile",
+          "detail": "The HTTPS speed probe did not finish.",
+          "detailError": "The HTTPS speed probe did not finish: {{error}}"
+        },
+        "throughputUnstable": {
+          "title": "Speed through the server is unstable",
+          "detail": "Spread of the short samples {{spread}}%, stalls: {{stalls}}, longest pause: {{gap}} ms."
+        },
+        "throughputDegraded": {
+          "title": "The profile became noticeably slower than at the previous check",
+          "detail": "The median speed dropped from {{previous}} to {{current}} Mbps."
+        },
+        "twitchRisk": {
+          "title": "Twitch error #2000 risk (QUIC blackhole)",
+          "detail": "The VPN profile uses a TCP transport without UDP support, but UDP/443 (QUIC) is not blocked. Browsers will try to load media over HTTP/3, which leads to video timeouts and Twitch error #2000."
+        },
+        "twitchOk": {
+          "title": "Twitch HLS media streams are protected",
+          "detail": "HLS video delivery is confirmed. The QUIC blackhole guard is active; browsers correctly use HTTPS/TCP."
+        },
+        "twitchUnreachable": {
+          "title": "Twitch HLS servers unreachable",
+          "detail": "Could not connect to the Twitch video delivery servers through the tunnel.",
+          "detailError": "Could not connect to the Twitch video delivery servers through the tunnel: {{error}}"
+        },
+        "splitConflict": {
+          "title": "Overlapping split tunneling rules",
+          "detail": "One process_name appears in several routing rules."
+        },
+        "splitFailed": {
+          "title": "Could not read split tunneling",
+          "detail": "The state of process-based routing is unknown.",
+          "detailError": "The state of process-based routing is unknown: {{error}}"
+        }
+      }
+    }
+  }
+}

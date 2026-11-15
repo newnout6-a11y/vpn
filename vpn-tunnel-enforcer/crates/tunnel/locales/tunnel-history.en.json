@@ -1,0 +1,64 @@
+{
+  "tunnel": {
+    "outcome": {
+      "verbatim": "{{text}}",
+      "headline": {
+        "userStop": "You turned protection off",
+        "appQuit": "The app was closed — protection is off",
+        "serverSwitch": "Server change",
+        "rotation": "Automatic server rotation",
+        "schedule": "Scheduled disconnect",
+        "proxyUnreachable": "The proxy server stopped responding — traffic was held in the tunnel so it could not leak past the VPN",
+        "serverRejectedKey": {
+          "plain": "The server refused the connection (key, SNI or certificate did not match)",
+          "realityKeyMismatch": "The server refused the connection: the server rejected the REALITY key",
+          "tlsHandshakeFailed": "The server refused the connection: the server dropped the TLS handshake"
+        },
+        "serverDown": {
+          "plain": "The node is unreachable — the connection was refused or timed out",
+          "upstreamUnreachable": "The node is unreachable: no response from the node"
+        },
+        "singboxCrash": {
+          "plain": "The VPN core (sing-box) exited unexpectedly",
+          "code": "The VPN core (sing-box) exited unexpectedly (code {{code}})",
+          "restarts_one": "The VPN core (sing-box) exited unexpectedly after {{count}} automatic restart attempt",
+          "restarts_few": "The VPN core (sing-box) exited unexpectedly after {{count}} automatic restart attempts",
+          "restarts_many": "The VPN core (sing-box) exited unexpectedly after {{count}} automatic restart attempts",
+          "restarts_other": "The VPN core (sing-box) exited unexpectedly after {{count}} automatic restart attempts",
+          "codeRestarts_one": "The VPN core (sing-box) exited unexpectedly (code {{code}}) after {{count}} automatic restart attempt",
+          "codeRestarts_few": "The VPN core (sing-box) exited unexpectedly (code {{code}}) after {{count}} automatic restart attempts",
+          "codeRestarts_many": "The VPN core (sing-box) exited unexpectedly (code {{code}}) after {{count}} automatic restart attempts",
+          "codeRestarts_other": "The VPN core (sing-box) exited unexpectedly (code {{code}}) after {{count}} automatic restart attempts"
+        },
+        "killswitch": {
+          "plain": "The kill switch held traffic after the tunnel dropped.",
+          "restarts_one": "The kill switch held traffic after the tunnel dropped, after {{count}} automatic restart attempt.",
+          "restarts_few": "The kill switch held traffic after the tunnel dropped, after {{count}} automatic restart attempts.",
+          "restarts_many": "The kill switch held traffic after the tunnel dropped, after {{count}} automatic restart attempts.",
+          "restarts_other": "The kill switch held traffic after the tunnel dropped, after {{count}} automatic restart attempts."
+        },
+        "tunSetupFailed": "Could not bring up the network tunnel (Wintun, routes or DNS)",
+        "networkLost": {
+          "plain": "The physical network went away or changed under the tunnel",
+          "adapterRemoved": "The network changed under the tunnel: an adapter was disconnected",
+          "adapterAdded": "The network changed under the tunnel: a new adapter was connected",
+          "addressChanged": "The network changed under the tunnel: the IP address changed",
+          "text": "The network changed under the tunnel: {{transition}}"
+        },
+        "systemSleep": "The computer went to sleep — the tunnel was recreated",
+        "startFailed": {
+          "plain": "Could not start protection",
+          "hint": "Could not start: {{hint}}"
+        },
+        "unknown": "The tunnel ended for an unknown reason"
+      }
+    },
+    "history": {
+      "invalidEntry": "The connection history record is invalid and was not saved",
+      "legacyDropped_one": "{{count}} connection history record from the previous version was damaged and not carried over",
+      "legacyDropped_few": "{{count}} connection history records from the previous version were damaged and not carried over",
+      "legacyDropped_many": "{{count}} connection history records from the previous version were damaged and not carried over",
+      "legacyDropped_other": "{{count}} connection history records from the previous version were damaged and not carried over"
+    }
+  }
+}

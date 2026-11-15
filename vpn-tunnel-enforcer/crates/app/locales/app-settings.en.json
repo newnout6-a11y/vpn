@@ -1,0 +1,51 @@
+{
+  "app": {
+    "settings": {
+      "tunnelLists": {
+        "service": "In Tunnel mode the helper service uses its own lists for now.",
+        "kept": "In Tunnel mode the earlier lists run for now: the helper service did not take the new ones.",
+        "nextConnect": "In Tunnel mode these lists apply from the next connection."
+      },
+      "hardNeedsAdmin": "Tunnel mode needs the helper service. Proxy mode works without it.",
+      "captureUnavailable": "Deep packet capture is not available in this version of the app.",
+      "automationUnavailable": "This feature is not available right now: the automation of the app did not start.",
+      "transferUnavailable": "Configuration import and export are not available in this version of the app.",
+      "diagnosticsUnavailable": "The diagnostics ZIP export is not available in this version of the app.",
+      "themeUnknown": "This theme no longer exists.",
+      "theme": {
+        "light": "Light",
+        "dark": "Dark",
+        "system": "System"
+      },
+      "killSwitch": {
+        "unconfirmed": "The Windows filters could not be verified."
+      },
+      "domains": {
+        "ruleGone": "This rule no longer exists.",
+        "noList": "Choose a domain list file first."
+      },
+      "dialog": {
+        "domainList": "Import a domain list",
+        "pickApp": "Choose a program",
+        "textFiles": "Text files",
+        "programs": "Programs",
+        "allFiles": "All files"
+      },
+      "wizard": {
+        "softChosen": "Proxy mode selected",
+        "softChosenBody": "Tunnel mode needs the helper service, so Proxy mode was saved.",
+        "restoreFailed": "The wizard could not undo all of its changes: check the kill switch and autostart in Settings."
+      }
+    },
+    "logs": {
+      "historyUnreadable": "The connection history could not be read. It will be read again at the next start.",
+      "trafficUnavailable": "Clearing the traffic history is not available in this version of the app.",
+      "exportFailed": "Could not write the file. Choose another folder.",
+      "dialog": {
+        "export": "Export connection history",
+        "csv": "CSV table",
+        "json": "JSON"
+      }
+    }
+  }
+}

@@ -1,0 +1,45 @@
+[package]
+name = "vpnte-probes"
+description = "Measurements: public IP and leak checks, diagnostics, availability, speed test, pings, country verification, key health and live server checks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+fastrand.workspace = true
+futures-util.workspace = true
+httparse = "1"
+jiff.workspace = true
+parking_lot.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+rustls-platform-verifier = "0.7"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+vpnte-base.workspace = true
+vpnte-core.workspace = true
+vpnte-engine.workspace = true
+vpnte-profiles.workspace = true
+vpnte-winnet.workspace = true
+windows = { workspace = true, features = ["Win32_Networking_WinHttp", "Win32_System_Services", "Win32_NetworkManagement_Dns"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true
+
+[features]
+# WP-12 lab engine mihomo: never enabled by a production build.
+lab = ["vpnte-engine/lab"]
